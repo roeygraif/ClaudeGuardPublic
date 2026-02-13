@@ -340,22 +340,25 @@ def _launch_claude(extra_args: list[str]) -> None:
     if not use_server:
         api_key = resolve_api_key()
         if not api_key:
+            # No server login and no API key — run interactive login.
             print(
-                "\033[1;31mError:\033[0m Could not find an Anthropic API key.\n"
-                "Cloud Watchdog checked:\n"
-                "  1. Claude Guard server login (run: claude-guard login)\n"
-                "  2. ANTHROPIC_API_KEY environment variable\n"
-                "  3. Claude Code's stored credentials (macOS Keychain)\n\n"
-                "Either log in to your team:\n"
-                "  claude-guard login\n\n"
-                "Or set the env var:\n"
-                "  export ANTHROPIC_API_KEY=sk-ant-...\n\n"
-                "Or log in to Claude Code first:\n"
-                "  claude\n"
-                "  (complete the login flow, then exit and run claude-guard)\n",
+                "\033[33m  No Cloud Guard credentials found. "
+                "Let's get you set up.\033[0m\n",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            _cmd_login()
+            # Reload config after login.
+            cfg = _load_config()
+            server_url = cfg.get("server_url")
+            server_token = cfg.get("access_token")
+            use_server = bool(server_url and server_token)
+            if not use_server:
+                print(
+                    "\033[1;31mError:\033[0m Login did not complete. "
+                    "Run claude-guard login to try again.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     # Locate the hook script.
     hook_script = Path(__file__).resolve().parent / "watchdog" / "hook.py"
