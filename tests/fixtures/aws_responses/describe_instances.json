@@ -1,0 +1,212 @@
+{
+  "Reservations": [
+    {
+      "ReservationId": "r-0abcdef1234567890",
+      "OwnerId": "123456789012",
+      "Groups": [],
+      "Instances": [
+        {
+          "InstanceId": "i-0abcdef1234567890",
+          "ImageId": "ami-0abcdef1234567890",
+          "InstanceType": "t3.medium",
+          "KeyName": "prod-key",
+          "LaunchTime": "2024-01-15T08:30:00.000Z",
+          "Monitoring": {
+            "State": "enabled"
+          },
+          "Placement": {
+            "AvailabilityZone": "us-east-1a",
+            "GroupName": "",
+            "Tenancy": "default"
+          },
+          "Platform": "linux",
+          "PrivateDnsName": "ip-10-0-1-42.ec2.internal",
+          "PrivateIpAddress": "10.0.1.42",
+          "PublicDnsName": "ec2-54-123-45-67.compute-1.amazonaws.com",
+          "PublicIpAddress": "54.123.45.67",
+          "State": {
+            "Code": 16,
+            "Name": "running"
+          },
+          "SubnetId": "subnet-0abcdef1234567890",
+          "VpcId": "vpc-0abcdef1234567890",
+          "Architecture": "x86_64",
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/xvda",
+              "Ebs": {
+                "AttachTime": "2024-01-15T08:30:00.000Z",
+                "DeleteOnTermination": true,
+                "Status": "attached",
+                "VolumeId": "vol-0abcdef1234567890"
+              }
+            }
+          ],
+          "EbsOptimized": true,
+          "EnaSupport": true,
+          "Hypervisor": "xen",
+          "IamInstanceProfile": {
+            "Arn": "arn:aws:iam::123456789012:instance-profile/prod-web-profile",
+            "Id": "AIPA0ABCDEF1234567890"
+          },
+          "NetworkInterfaces": [
+            {
+              "Association": {
+                "IpOwnerId": "123456789012",
+                "PublicDnsName": "ec2-54-123-45-67.compute-1.amazonaws.com",
+                "PublicIp": "54.123.45.67"
+              },
+              "Attachment": {
+                "AttachTime": "2024-01-15T08:30:00.000Z",
+                "AttachmentId": "eni-attach-0abcdef1234567890",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 0,
+                "Status": "attached",
+                "NetworkCardIndex": 0
+              },
+              "Description": "Primary network interface",
+              "Groups": [
+                {
+                  "GroupName": "prod-web-sg",
+                  "GroupId": "sg-0abcdef1234567890"
+                }
+              ],
+              "InterfaceType": "interface",
+              "MacAddress": "0a:1b:2c:3d:4e:5f",
+              "NetworkInterfaceId": "eni-0abcdef1234567890",
+              "OwnerId": "123456789012",
+              "PrivateDnsName": "ip-10-0-1-42.ec2.internal",
+              "PrivateIpAddress": "10.0.1.42",
+              "PrivateIpAddresses": [
+                {
+                  "Association": {
+                    "IpOwnerId": "123456789012",
+                    "PublicDnsName": "ec2-54-123-45-67.compute-1.amazonaws.com",
+                    "PublicIp": "54.123.45.67"
+                  },
+                  "Primary": true,
+                  "PrivateIpAddress": "10.0.1.42"
+                }
+              ],
+              "SourceDestCheck": true,
+              "Status": "in-use",
+              "SubnetId": "subnet-0abcdef1234567890",
+              "VpcId": "vpc-0abcdef1234567890"
+            }
+          ],
+          "RootDeviceName": "/dev/xvda",
+          "RootDeviceType": "ebs",
+          "SecurityGroups": [
+            {
+              "GroupName": "prod-web-sg",
+              "GroupId": "sg-0abcdef1234567890"
+            }
+          ],
+          "SourceDestCheck": true,
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": "prod-web-01"
+            },
+            {
+              "Key": "Environment",
+              "Value": "production"
+            },
+            {
+              "Key": "Team",
+              "Value": "platform"
+            },
+            {
+              "Key": "Service",
+              "Value": "web-frontend"
+            }
+          ],
+          "VirtualizationType": "hvm",
+          "CpuOptions": {
+            "CoreCount": 1,
+            "ThreadsPerCore": 2
+          },
+          "MetadataOptions": {
+            "State": "applied",
+            "HttpTokens": "required",
+            "HttpPutResponseHopLimit": 1,
+            "HttpEndpoint": "enabled",
+            "HttpProtocolIpv6": "disabled",
+            "InstanceMetadataTags": "disabled"
+          },
+          "EnclaveOptions": {
+            "Enabled": false
+          },
+          "BootMode": "uefi-preferred",
+          "PlatformDetails": "Linux/UNIX",
+          "UsageOperation": "RunInstances",
+          "UsageOperationUpdateTime": "2024-01-15T08:30:00.000Z",
+          "MaintenanceOptions": {
+            "AutoRecovery": "default"
+          },
+          "CurrentInstanceBootMode": "legacy-bios"
+        },
+        {
+          "InstanceId": "i-0fedcba0987654321",
+          "ImageId": "ami-0abcdef1234567890",
+          "InstanceType": "t3.small",
+          "KeyName": "dev-key",
+          "LaunchTime": "2024-06-01T12:00:00.000Z",
+          "Monitoring": {
+            "State": "disabled"
+          },
+          "Placement": {
+            "AvailabilityZone": "us-east-1b",
+            "GroupName": "",
+            "Tenancy": "default"
+          },
+          "PrivateDnsName": "ip-10-0-2-99.ec2.internal",
+          "PrivateIpAddress": "10.0.2.99",
+          "State": {
+            "Code": 16,
+            "Name": "running"
+          },
+          "SubnetId": "subnet-0fedcba0987654321",
+          "VpcId": "vpc-0abcdef1234567890",
+          "Architecture": "x86_64",
+          "SecurityGroups": [
+            {
+              "GroupName": "dev-default-sg",
+              "GroupId": "sg-0fedcba0987654321"
+            }
+          ],
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": "dev-worker-01"
+            },
+            {
+              "Key": "Environment",
+              "Value": "development"
+            },
+            {
+              "Key": "Team",
+              "Value": "backend"
+            }
+          ],
+          "VirtualizationType": "hvm"
+        }
+      ]
+    }
+  ],
+  "ResponseMetadata": {
+    "RequestId": "a1b2c3d4-5678-90ab-cdef-example11111",
+    "HTTPStatusCode": 200,
+    "HTTPHeaders": {
+      "x-amzn-requestid": "a1b2c3d4-5678-90ab-cdef-example11111",
+      "cache-control": "no-cache, no-store",
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "vary": "accept-encoding",
+      "content-type": "text/xml;charset=UTF-8",
+      "transfer-encoding": "chunked",
+      "date": "Wed, 11 Feb 2026 00:00:00 GMT",
+      "server": "AmazonEC2"
+    },
+    "RetryAttempts": 0
+  }
+}

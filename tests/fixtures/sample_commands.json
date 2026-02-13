@@ -1,0 +1,188 @@
+[
+  {
+    "command": "aws s3 ls",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "S3 list buckets"
+  },
+  {
+    "command": "aws s3 ls s3://my-bucket/prefix/",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "S3 list objects in bucket"
+  },
+  {
+    "command": "aws ec2 describe-instances",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "EC2 describe instances"
+  },
+  {
+    "command": "aws rds describe-db-instances",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "RDS describe DB instances"
+  },
+  {
+    "command": "aws rds delete-db-instance --db-instance-identifier prod-main",
+    "expected_provider": "aws",
+    "expected_action_type": "DELETE",
+    "description": "RDS delete DB instance"
+  },
+  {
+    "command": "aws ec2 terminate-instances --instance-ids i-0abcdef1234567890",
+    "expected_provider": "aws",
+    "expected_action_type": "DELETE",
+    "description": "EC2 terminate instance"
+  },
+  {
+    "command": "aws iam attach-role-policy --role-name admin-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+    "expected_provider": "aws",
+    "expected_action_type": "ADMIN",
+    "description": "IAM attach admin policy"
+  },
+  {
+    "command": "aws ec2 authorize-security-group-ingress --group-id sg-abc --protocol tcp --port 22 --cidr 0.0.0.0/0",
+    "expected_provider": "aws",
+    "expected_action_type": "ADMIN",
+    "description": "EC2 authorize SG ingress (admin due to SG action pattern)"
+  },
+  {
+    "command": "aws lambda update-function-code --function-name my-func --zip-file fileb://func.zip",
+    "expected_provider": "aws",
+    "expected_action_type": "WRITE",
+    "description": "Lambda update function code"
+  },
+  {
+    "command": "aws s3 rm s3://my-bucket --recursive",
+    "expected_provider": "aws",
+    "expected_action_type": "DELETE",
+    "description": "S3 recursive delete"
+  },
+  {
+    "command": "aws s3 cp file.txt s3://my-bucket/",
+    "expected_provider": "aws",
+    "expected_action_type": "WRITE",
+    "description": "S3 copy file to bucket"
+  },
+  {
+    "command": "aws s3 sync ./build s3://deploy-bucket",
+    "expected_provider": "aws",
+    "expected_action_type": "WRITE",
+    "description": "S3 sync directory to bucket"
+  },
+  {
+    "command": "aws --profile prod rds describe-db-instances",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "AWS with profile flag"
+  },
+  {
+    "command": "aws --region eu-west-1 ec2 describe-instances",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "AWS with region flag"
+  },
+  {
+    "command": "aws dynamodb delete-table --table-name users-prod",
+    "expected_provider": "aws",
+    "expected_action_type": "DELETE",
+    "description": "DynamoDB delete table"
+  },
+  {
+    "command": "aws sts get-caller-identity",
+    "expected_provider": "aws",
+    "expected_action_type": "ADMIN",
+    "description": "STS get caller identity (admin service)"
+  },
+  {
+    "command": "aws kms describe-key --key-id alias/my-key",
+    "expected_provider": "aws",
+    "expected_action_type": "ADMIN",
+    "description": "KMS describe key (admin service)"
+  },
+  {
+    "command": "aws cloudformation create-stack --stack-name my-stack --template-body file://tmpl.yaml",
+    "expected_provider": "aws",
+    "expected_action_type": "WRITE",
+    "description": "CloudFormation create stack"
+  },
+  {
+    "command": "aws ecs update-service --cluster prod --service api --desired-count 3",
+    "expected_provider": "aws",
+    "expected_action_type": "WRITE",
+    "description": "ECS update service"
+  },
+  {
+    "command": "aws logs describe-log-groups",
+    "expected_provider": "aws",
+    "expected_action_type": "READ",
+    "description": "CloudWatch Logs describe log groups"
+  },
+  {
+    "command": "gcloud compute instances list",
+    "expected_provider": "gcp",
+    "expected_action_type": "READ",
+    "description": "GCP list compute instances"
+  },
+  {
+    "command": "gcloud compute instances delete my-instance --zone us-central1-a",
+    "expected_provider": "gcp",
+    "expected_action_type": "DELETE",
+    "description": "GCP delete compute instance"
+  },
+  {
+    "command": "gcloud iam service-accounts create test-sa",
+    "expected_provider": "gcp",
+    "expected_action_type": "ADMIN",
+    "description": "GCP create service account (admin)"
+  },
+  {
+    "command": "gcloud sql instances describe prod-db",
+    "expected_provider": "gcp",
+    "expected_action_type": "READ",
+    "description": "GCP describe Cloud SQL instance"
+  },
+  {
+    "command": "gcloud container clusters delete my-cluster",
+    "expected_provider": "gcp",
+    "expected_action_type": "DELETE",
+    "description": "GCP delete GKE cluster"
+  },
+  {
+    "command": "gcloud compute instances create my-vm --zone us-central1-a --machine-type e2-medium",
+    "expected_provider": "gcp",
+    "expected_action_type": "WRITE",
+    "description": "GCP create compute instance"
+  },
+  {
+    "command": "ls -la",
+    "expect_none": true,
+    "description": "Non-cloud: ls"
+  },
+  {
+    "command": "git push origin main",
+    "expect_none": true,
+    "description": "Non-cloud: git push"
+  },
+  {
+    "command": "python3 script.py",
+    "expect_none": true,
+    "description": "Non-cloud: python script"
+  },
+  {
+    "command": "docker run -it ubuntu bash",
+    "expect_none": true,
+    "description": "Non-cloud: docker run"
+  },
+  {
+    "command": "curl https://api.example.com/health",
+    "expect_none": true,
+    "description": "Non-cloud: curl"
+  },
+  {
+    "command": "npm install express",
+    "expect_none": true,
+    "description": "Non-cloud: npm install"
+  }
+]
