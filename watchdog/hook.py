@@ -159,13 +159,17 @@ def main() -> None:
     print(format_warning(assessment, parsed), file=sys.stderr)
     sys.stderr.flush()
 
+    # Build a rich reason string for Claude Code's confirmation dialog.
+    # This is the ONLY text the user sees, so pack it with key info.
+    reason = _build_permission_reason(assessment)
+
     # Output the hook response to stdout — request user confirmation.
     json.dump(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "ask",
-                "permissionDecisionReason": assessment.summary,
+                "permissionDecisionReason": reason,
             }
         },
         sys.stdout,
@@ -430,6 +434,38 @@ def _fallback_assessment(parsed) -> "RiskAssessment":
         reversible=action_type != "DELETE",
         recommendation="Verify the command manually before proceeding.",
     )
+
+
+def _build_permission_reason(assessment) -> str:
+    """Build a rich multi-line reason for Claude Code's confirmation dialog.
+
+    This is the only text the user sees in the permission prompt, so we
+    include risk level, cost, blast radius, and recommendation.
+    """
+    risk = getattr(assessment, "risk_level", "UNKNOWN")
+    summary = getattr(assessment, "summary", "")
+    cost = getattr(assessment, "cost_estimate", "")
+    blast = getattr(assessment, "blast_radius", []) or []
+    recommendation = getattr(assessment, "recommendation", "")
+    reversible = getattr(assessment, "reversible", None)
+
+    lines = []
+    lines.append(f"////// CLOUD WATCHDOG — Risk: {risk} //////")
+    lines.append("")
+    if summary:
+        lines.append(summary)
+        lines.append("")
+    if cost:
+        lines.append(f"Cost: {cost}")
+    if reversible is not None:
+        lines.append(f"Reversible: {'Yes' if reversible else 'NO'}")
+    if blast:
+        lines.append(f"Blast radius: {', '.join(blast[:5])}")
+    if recommendation:
+        lines.append("")
+        lines.append(f"Recommendation: {recommendation}")
+
+    return "\n".join(lines)
 
 
 def _audit_log(command: str, assessment) -> None:
