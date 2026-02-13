@@ -109,6 +109,17 @@ AWS_ALLOWLIST: dict[tuple[str, str], str] = {
     # CloudFront
     ("cloudfront", "get_distribution"): "Get CloudFront distribution details",
     ("cloudfront", "list_distributions"): "List CloudFront distributions",
+    # DynamoDB
+    ("dynamodb", "describe_table"): "Describe a DynamoDB table (status, item count, size, throughput, GSIs)",
+    ("dynamodb", "describe_continuous_backups"): "Check if point-in-time recovery is enabled for a DynamoDB table",
+    ("dynamodb", "describe_time_to_live"): "Check TTL configuration for a DynamoDB table",
+    ("dynamodb", "list_tags_of_resource"): "List tags on a DynamoDB resource",
+    # SQS
+    ("sqs", "get_queue_attributes"): "Get SQS queue attributes (message count, policy, DLQ config)",
+    ("sqs", "list_queues"): "List SQS queues",
+    # SNS
+    ("sns", "get_topic_attributes"): "Get SNS topic attributes (subscriptions, policy)",
+    ("sns", "list_subscriptions_by_topic"): "List subscriptions for an SNS topic",
     # STS
     ("sts", "get_caller_identity"): "Get the current IAM caller identity",
     # CloudWatch
@@ -576,6 +587,65 @@ _AWS_TOOL_SCHEMAS: dict[tuple[str, str], dict] = {
     ("cloudfront", "list_distributions"): {
         "type": "object",
         "properties": {},
+    },
+    # DynamoDB
+    ("dynamodb", "describe_table"): {
+        "type": "object",
+        "properties": {
+            "TableName": {"type": "string", "description": "DynamoDB table name"},
+        },
+        "required": ["TableName"],
+    },
+    ("dynamodb", "describe_continuous_backups"): {
+        "type": "object",
+        "properties": {
+            "TableName": {"type": "string"},
+        },
+        "required": ["TableName"],
+    },
+    ("dynamodb", "describe_time_to_live"): {
+        "type": "object",
+        "properties": {
+            "TableName": {"type": "string"},
+        },
+        "required": ["TableName"],
+    },
+    ("dynamodb", "list_tags_of_resource"): {
+        "type": "object",
+        "properties": {
+            "ResourceArn": {"type": "string", "description": "DynamoDB table ARN"},
+        },
+        "required": ["ResourceArn"],
+    },
+    # SQS
+    ("sqs", "get_queue_attributes"): {
+        "type": "object",
+        "properties": {
+            "QueueUrl": {"type": "string"},
+            "AttributeNames": {"type": "array", "items": {"type": "string"}, "description": "e.g. [All]"},
+        },
+        "required": ["QueueUrl", "AttributeNames"],
+    },
+    ("sqs", "list_queues"): {
+        "type": "object",
+        "properties": {
+            "QueueNamePrefix": {"type": "string"},
+        },
+    },
+    # SNS
+    ("sns", "get_topic_attributes"): {
+        "type": "object",
+        "properties": {
+            "TopicArn": {"type": "string"},
+        },
+        "required": ["TopicArn"],
+    },
+    ("sns", "list_subscriptions_by_topic"): {
+        "type": "object",
+        "properties": {
+            "TopicArn": {"type": "string"},
+        },
+        "required": ["TopicArn"],
     },
     # STS
     ("sts", "get_caller_identity"): {
@@ -1222,6 +1292,36 @@ def _execute_aws(service: str, method: str, tool_input: dict, session_kwargs: di
     elif (service, method) == ("cloudfront", "list_distributions"):
         client = session.client("cloudfront")
         return _serialize_response(client.list_distributions(**tool_input))
+
+    # --- DynamoDB ---
+    elif (service, method) == ("dynamodb", "describe_table"):
+        client = session.client("dynamodb")
+        return _serialize_response(client.describe_table(**tool_input))
+    elif (service, method) == ("dynamodb", "describe_continuous_backups"):
+        client = session.client("dynamodb")
+        return _serialize_response(client.describe_continuous_backups(**tool_input))
+    elif (service, method) == ("dynamodb", "describe_time_to_live"):
+        client = session.client("dynamodb")
+        return _serialize_response(client.describe_time_to_live(**tool_input))
+    elif (service, method) == ("dynamodb", "list_tags_of_resource"):
+        client = session.client("dynamodb")
+        return _serialize_response(client.list_tags_of_resource(**tool_input))
+
+    # --- SQS ---
+    elif (service, method) == ("sqs", "get_queue_attributes"):
+        client = session.client("sqs")
+        return _serialize_response(client.get_queue_attributes(**tool_input))
+    elif (service, method) == ("sqs", "list_queues"):
+        client = session.client("sqs")
+        return _serialize_response(client.list_queues(**tool_input))
+
+    # --- SNS ---
+    elif (service, method) == ("sns", "get_topic_attributes"):
+        client = session.client("sns")
+        return _serialize_response(client.get_topic_attributes(**tool_input))
+    elif (service, method) == ("sns", "list_subscriptions_by_topic"):
+        client = session.client("sns")
+        return _serialize_response(client.list_subscriptions_by_topic(**tool_input))
 
     # --- STS ---
     elif (service, method) == ("sts", "get_caller_identity"):
