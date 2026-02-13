@@ -25,6 +25,12 @@ import os
 import sys
 import logging
 
+# Ensure the package root is on sys.path so that "import watchdog" resolves
+# to our package, not the unrelated "watchdog" file-system watcher library.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
 # Configure logging to stderr so it doesn't interfere with JSON stdout.
 logging.basicConfig(
     level=logging.WARNING,
