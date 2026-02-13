@@ -113,13 +113,6 @@ def _cmd_login() -> None:
 
     server_url = cfg.get("server_url") or _DEFAULT_SERVER_URL
 
-    print("\033[1;31m━━━ CLAUDE GUARD LOGIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
-
-    # Decide: existing account or new registration.
-    choice = input("  (1) Log in to existing account\n"
-                    "  (2) Register with team invite code\n"
-                    "  Choice [1/2]: ").strip()
-
     try:
         import requests as req
     except ImportError:
@@ -130,43 +123,50 @@ def _cmd_login() -> None:
         )
         sys.exit(1)
 
-    if choice == "2":
-        invite_code = input("  Team invite code: ").strip()
-        email = input("  Email: ").strip()
-        password = getpass.getpass("  Password: ")
-        display_name = input("  Display name (optional): ").strip()
+    while True:
+        print("\033[1;31m━━━ CLAUDE GUARD LOGIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
 
-        resp = req.post(
-            f"{server_url}/api/v1/auth/register",
-            json={
-                "invite_code": invite_code,
-                "email": email,
-                "password": password,
-                "display_name": display_name or email.split("@")[0],
-            },
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            detail = resp.json().get("detail", resp.text)
-            print(f"\033[1;31mRegistration failed:\033[0m {detail}", file=sys.stderr)
+        # Decide: existing account or new registration.
+        choice = input("  (1) Log in to existing account\n"
+                        "  (2) Register with team invite code\n"
+                        "  Choice [1/2]: ").strip()
+
+        if choice == "2":
+            invite_code = input("  Team invite code: ").strip()
+            email = input("  Email: ").strip()
+            password = getpass.getpass("  Password: ")
+            display_name = input("  Display name (optional): ").strip()
+
+            resp = req.post(
+                f"{server_url}/api/v1/auth/register",
+                json={
+                    "invite_code": invite_code,
+                    "email": email,
+                    "password": password,
+                    "display_name": display_name or email.split("@")[0],
+                },
+                timeout=30,
+            )
+        else:
+            email = input("  Email: ").strip()
+            password = getpass.getpass("  Password: ")
+
+            resp = req.post(
+                f"{server_url}/api/v1/auth/login",
+                json={"email": email, "password": password},
+                timeout=30,
+            )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            break
+
+        detail = resp.json().get("detail", resp.text)
+        print(f"\n\033[1;31mFailed:\033[0m {detail}", file=sys.stderr)
+        retry = input("  Try again? [Y/n]: ").strip().lower()
+        if retry == "n":
             sys.exit(1)
-
-        data = resp.json()
-    else:
-        email = input("  Email: ").strip()
-        password = getpass.getpass("  Password: ")
-
-        resp = req.post(
-            f"{server_url}/api/v1/auth/login",
-            json={"email": email, "password": password},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            detail = resp.json().get("detail", resp.text)
-            print(f"\033[1;31mLogin failed:\033[0m {detail}", file=sys.stderr)
-            sys.exit(1)
-
-        data = resp.json()
+        print()
 
     _save_config({
         "server_url": server_url,
