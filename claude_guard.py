@@ -468,8 +468,10 @@ def _launch_claude(extra_args: list[str]) -> None:
         if use_server:
             run_env["GUARD_SERVER_URL"] = server_url
             run_env["GUARD_TOKEN"] = server_token
-        else:
-            run_env["ANTHROPIC_API_KEY"] = api_key
+        # Note: don't inject ANTHROPIC_API_KEY into Claude Code's env —
+        # it conflicts with Claude Code's own OAuth login. The hook
+        # command already receives the key inline (see hook_command above).
+        run_env.pop("ANTHROPIC_API_KEY", None)
         result = subprocess.run(
             [claude_bin] + extra_args,
             env=run_env,
