@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -45,44 +44,9 @@ def resolve_api_key() -> str | None:
     """
     # 1. Explicit environment variable (always wins).
     key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
+    if key and key.startswith("sk-ant-"):
         return key
 
-    # 2. macOS Keychain — Claude Code stores credentials under
-    #    service="Claude Code-credentials", account=<username>.
-    if platform.system() == "Darwin":
-        key = _read_keychain_credential()
-        if key:
-            return key
-
-    return None
-
-
-def _read_keychain_credential() -> str | None:
-    """Read Claude Code's OAuth access token from the macOS Keychain."""
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s", "Claude Code-credentials",
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-
-        payload = json.loads(result.stdout.strip())
-        # Claude Code stores {"claudeAiOauth": {"accessToken": "...", ...}}
-        oauth = payload.get("claudeAiOauth", {})
-        token = oauth.get("accessToken")
-        if token:
-            return token
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired, KeyError):
-        pass
     return None
 
 
