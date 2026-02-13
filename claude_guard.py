@@ -337,13 +337,10 @@ def _launch_claude(extra_args: list[str]) -> None:
     WATCHDOG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Build the hook configuration.
+    # The hook reads credentials from ~/.cloud-watchdog/config.json directly,
+    # so we don't need to pass tokens via env vars.
     if use_server:
-        # Server mode: pass server URL + token to hook via env vars.
-        hook_command = (
-            f"GUARD_SERVER_URL={server_url} "
-            f"GUARD_TOKEN={server_token} "
-            f"python3 {hook_script}"
-        )
+        hook_command = f"python3 {hook_script}"
     else:
         # Local mode: pass API key directly.
         hook_command = f"ANTHROPIC_API_KEY={api_key} python3 {hook_script}"

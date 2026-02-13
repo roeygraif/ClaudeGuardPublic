@@ -106,10 +106,10 @@ def main() -> None:
 
     # --- WRITE/DELETE/ADMIN: gather context, ask Claude, show warning ---
 
-    # Server mode: if GUARD_SERVER_URL and GUARD_TOKEN are set, delegate
-    # analysis to the backend instead of running the brain locally.
-    server_url = os.environ.get("GUARD_SERVER_URL")
-    server_token = os.environ.get("GUARD_TOKEN")
+    # Server mode: read config file for server URL + tokens.
+    # The config file has a refresh_token so we can recover from expired
+    # access tokens without requiring the user to re-login.
+    server_url, server_token = _resolve_server_creds()
 
     if server_url and server_token:
         assessment = _analyze_via_server(server_url, server_token, parsed)
@@ -154,6 +154,101 @@ def main() -> None:
     sys.exit(0)
 
 
+_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".cloud-watchdog", "config.json")
+
+
+def _resolve_server_creds() -> tuple[str | None, str | None]:
+    """Read server URL and access token from the config file.
+
+    Falls back to env vars for backwards compatibility.
+    """
+    # Try config file first (has refresh_token for auto-renewal).
+    try:
+        with open(_CONFIG_FILE) as f:
+            import json as _json
+            cfg = _json.load(f)
+        server_url = cfg.get("server_url")
+        access_token = cfg.get("access_token")
+        if server_url and access_token:
+            return server_url, access_token
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+
+    # Fall back to env vars.
+    return (
+        os.environ.get("GUARD_SERVER_URL"),
+        os.environ.get("GUARD_TOKEN"),
+    )
+
+
+def _refresh_and_retry(server_url: str, parsed) -> "RiskAssessment | None":
+    """Try to refresh the access token and retry the analysis."""
+    try:
+        import requests
+        with open(_CONFIG_FILE) as f:
+            import json as _json
+            cfg = _json.load(f)
+
+        refresh_token = cfg.get("refresh_token")
+        if not refresh_token:
+            return None
+
+        resp = requests.post(
+            f"{server_url.rstrip('/')}/api/v1/auth/refresh",
+            json={"refresh_token": refresh_token},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        new_token = data["access_token"]
+
+        # Save updated tokens.
+        cfg["access_token"] = new_token
+        if data.get("refresh_token"):
+            cfg["refresh_token"] = data["refresh_token"]
+        with open(_CONFIG_FILE, "w") as f:
+            import json as _json
+            _json.dump(cfg, f)
+
+        # Retry analysis with the new token.
+        resp = requests.post(
+            f"{server_url.rstrip('/')}/api/v1/analyze",
+            json={
+                "command": parsed.raw_command,
+                "provider": parsed.provider,
+                "service": parsed.service,
+                "action": parsed.action,
+                "action_type": parsed.action_type,
+                "resource_id": parsed.resource_id,
+                "flags": parsed.flags,
+                "region": parsed.region,
+                "profile": parsed.profile,
+                "warning": getattr(parsed, "warning", None),
+            },
+            headers={"Authorization": f"Bearer {new_token}"},
+            timeout=90,
+        )
+        resp.raise_for_status()
+
+        from watchdog.brain import RiskAssessment
+        d = resp.json()
+        return RiskAssessment(
+            risk_level=d.get("risk_level", "HIGH"),
+            summary=d.get("summary", "Server analysis complete."),
+            blast_radius=d.get("blast_radius", []),
+            explanation=d.get("explanation", ""),
+            reversible=d.get("reversible", False),
+            recommendation=d.get("recommendation", ""),
+            detailed_analysis=d.get("detailed_analysis", ""),
+            cost_estimate=d.get("cost_estimate", ""),
+        )
+    except Exception as exc:
+        logger.warning("Token refresh failed: %s", exc)
+        return None
+
+
 def _analyze_via_server(server_url: str, token: str, parsed) -> "RiskAssessment":
     """Send analysis request to the Claude Guard server.
 
@@ -181,6 +276,13 @@ def _analyze_via_server(server_url: str, token: str, parsed) -> "RiskAssessment"
             headers={"Authorization": f"Bearer {token}"},
             timeout=90,
         )
+        if resp.status_code == 401:
+            # Token expired — try refreshing.
+            refreshed = _refresh_and_retry(server_url, parsed)
+            if refreshed:
+                return refreshed
+            return _fallback_assessment(parsed)
+
         resp.raise_for_status()
         data = resp.json()
         return RiskAssessment(
