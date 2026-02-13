@@ -734,6 +734,39 @@ def scan_cloud_run(db: GraphDB, project: str) -> int:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+_SERVICE_SCANNERS = {
+    "compute": scan_compute_instances,
+    "container": scan_gke_clusters,
+    "sql": scan_cloud_sql,
+    "storage": scan_gcs_buckets,
+    "iam": scan_iam_policy,
+    "functions": scan_cloud_functions,
+    "run": scan_cloud_run,
+}
+
+
+def scan_gcp_service(
+    db: GraphDB,
+    service: str,
+    project: str | None = None,
+) -> None:
+    """Run the scanner for a single GCP service.
+
+    Looks up *service* in the known scanners. If no scanner exists for
+    this service, returns silently (graceful no-op).
+
+    All scanner functions are READ-ONLY — they only call list/get APIs.
+    """
+    scanner_fn = _SERVICE_SCANNERS.get(service)
+    if scanner_fn is None:
+        return
+
+    if project is None:
+        project = _get_project_id()
+
+    scanner_fn(db, project)
+
+
 def scan_gcp(db: GraphDB, project: str | None = None, on_progress=None) -> dict:
     """Discover GCP resources and store them in the graph database.
 

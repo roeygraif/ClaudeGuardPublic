@@ -31,8 +31,7 @@ BOLD = "\033[1m"
 # ---------------------------------------------------------------------------
 
 _SEPARATOR_WIDTH = 56
-_HEADER = f"\u2501\u2501\u2501 CLOUD WATCHDOG " + "\u2501" * (_SEPARATOR_WIDTH - 17)
-_FOOTER = "\u2501" * _SEPARATOR_WIDTH
+_BORDER = "/" * _SEPARATOR_WIDTH
 _INDENT = "  "
 _CONTENT_WIDTH = _SEPARATOR_WIDTH - len(_INDENT)
 
@@ -155,19 +154,31 @@ def _apply_inline_bold(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def print_scan_header(provider: str) -> None:
+def print_scan_header(provider: str, refresh: bool = False) -> None:
     """Print the initial activation banner to stderr.
 
     Parameters
     ----------
     provider:
         ``"AWS"`` or ``"GCP"`` (displayed in the banner).
+    refresh:
+        If True, show a shorter refresh message instead of the first-run banner.
     """
-    lines = [
-        f"{BOLD_RED}{_HEADER}{RESET}",
-        f"{RED}  ACTIVATED \u2014 First cloud command detected{RESET}",
-        f"{RED}  Initiating infrastructure scan...{RESET}",
-    ]
+    if refresh:
+        lines = [
+            f"{BOLD_RED}{_BORDER}{RESET}",
+            f"{RED}  CLOUD WATCHDOG \u2014 Refreshing infrastructure ({provider}){RESET}",
+            f"{BOLD_RED}{_BORDER}{RESET}",
+        ]
+    else:
+        lines = [
+            f"{BOLD_RED}{_BORDER}{RESET}",
+            f"{RED}  CLOUD WATCHDOG{RESET}",
+            f"{RED}  Initial infrastructure scan ({provider}){RESET}",
+            f"{RED}  This first scan maps your infrastructure and may{RESET}",
+            f"{RED}  take 30-60 seconds. Subsequent commands are faster.{RESET}",
+            f"{BOLD_RED}{_BORDER}{RESET}",
+        ]
     print("\n".join(lines), file=sys.stderr)
     sys.stderr.flush()
 
@@ -209,9 +220,24 @@ def print_scan_complete(summary: Dict[str, Any]) -> None:
         f"{RED}  Account: {account} ({region}){RESET}",
         f"{RED}  Environments: {prod} prod \u00b7 {staging} staging \u00b7 {dev} dev{RESET}",
         f"{RED}  Watchdog is now supervising.{RESET}",
-        f"{BOLD_RED}{_FOOTER}{RESET}",
+        f"{BOLD_RED}{_BORDER}{RESET}",
     ]
     print("\n".join(lines), file=sys.stderr)
+    sys.stderr.flush()
+
+
+def print_incremental_progress(service: str) -> None:
+    """Print a one-liner for a quick single-service rescan.
+
+    Parameters
+    ----------
+    service:
+        The service being refreshed, e.g. ``"ec2"``, ``"s3"``.
+    """
+    print(
+        f"{RED}  \u2192 Refreshing {service} infrastructure...{RESET}",
+        file=sys.stderr,
+    )
     sys.stderr.flush()
 
 
@@ -236,7 +262,7 @@ def format_warning(assessment: Any, parsed_command: Any) -> str:
     badge = _risk_badge(risk_level)
 
     lines: list[str] = [
-        f"{BOLD_RED}{_HEADER}{RESET}",
+        f"{BOLD_RED}{_BORDER}{RESET}",
         f"{RED}  Risk: {badge}{RESET}",
         f"{RED}  Command: {raw_command}{RESET}",
     ]
@@ -276,7 +302,7 @@ def format_warning(assessment: Any, parsed_command: Any) -> str:
         )
         lines.append(f"{RED}{rec_wrapped}{RESET}")
 
-    lines.append(f"{BOLD_RED}{_FOOTER}{RESET}")
+    lines.append(f"{BOLD_RED}{_BORDER}{RESET}")
     return "\n".join(lines)
 
 
@@ -308,12 +334,12 @@ def format_fallback_warning(action_type: str, environment: str) -> str:
         )
 
     lines = [
-        f"{BOLD_RED}{_HEADER}{RESET}",
+        f"{BOLD_RED}{_BORDER}{RESET}",
         severity_line,
         f"{RED}  Action type: {action_display}{RESET}",
         "",
         f"{RED}  Detailed analysis unavailable (brain offline).{RESET}",
         f"{RED}  Proceed with caution.{RESET}",
-        f"{BOLD_RED}{_FOOTER}{RESET}",
+        f"{BOLD_RED}{_BORDER}{RESET}",
     ]
     return "\n".join(lines)

@@ -1264,6 +1264,62 @@ def scan_cloudfront(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+_SERVICE_SCANNERS = {
+    "ec2": scan_ec2,
+    "rds": scan_rds,
+    "s3": scan_s3,
+    "lambda": scan_lambda,
+    "iam": scan_iam_roles,
+    "ecs": scan_ecs,
+    "eks": scan_eks,
+    "elb": scan_elb,
+    "elbv2": scan_elb,
+    "route53": scan_route53,
+    "cloudfront": scan_cloudfront,
+    "dynamodb": None,  # No scanner yet
+    "sqs": None,
+    "sns": None,
+}
+
+
+def scan_aws_service(
+    db: GraphDB,
+    service: str,
+    profile: str | None = None,
+    region: str | None = None,
+) -> None:
+    """Run the scanner for a single AWS service.
+
+    Looks up *service* in the known scanners. If no scanner exists for
+    this service, returns silently (graceful no-op).
+
+    All scanner functions are READ-ONLY — they only call describe_*(),
+    list_*(), get_*() APIs.
+    """
+    scanner_fn = _SERVICE_SCANNERS.get(service)
+    if scanner_fn is None:
+        return
+
+    session_kwargs: dict[str, str] = {}
+    if profile:
+        session_kwargs["profile_name"] = profile
+    if region:
+        session_kwargs["region_name"] = region
+    session = boto3.Session(**session_kwargs)
+    account = _get_account_id(session)
+    scan_region = region or session.region_name or "us-east-1"
+
+    # Global services don't take a region parameter.
+    if scanner_fn in (scan_iam_roles, scan_iam_policies):
+        scanner_fn(session, db, account)
+    elif scanner_fn in (scan_route53, scan_cloudfront):
+        scanner_fn(session, db, account)
+    elif scanner_fn == scan_s3:
+        scanner_fn(session, db, scan_region, account)
+    else:
+        scanner_fn(session, db, scan_region, account)
+
+
 def scan_aws(
     db: GraphDB,
     profile: str | None = None,

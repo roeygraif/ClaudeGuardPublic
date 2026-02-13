@@ -124,7 +124,7 @@ def _cmd_login() -> None:
         sys.exit(1)
 
     while True:
-        print("\033[1;31m━━━ CLAUDE GUARD LOGIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+        print("\033[1;31m" + "/" * 56 + "\033[0m")
 
         # Decide: existing account or new registration.
         choice = input("  (1) Log in to existing account\n"
@@ -177,7 +177,7 @@ def _cmd_login() -> None:
     })
 
     print(f"\n  \033[32m✓ Logged in to {data['org_name']}. You're all set!\033[0m")
-    print("\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    print("\033[1;31m" + "/" * 56 + "\033[0m")
 
 
 def _cmd_logout() -> None:
@@ -394,7 +394,7 @@ def _launch_claude(extra_args: list[str]) -> None:
     settings_file.write_text(json.dumps(existing, indent=2) + "\n")
 
     print(
-        "\033[1;31m━━━ CLOUD WATCHDOG ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m",
+        "\033[1;31m" + "/" * 56 + "\033[0m",
         file=sys.stderr,
     )
     if use_server:
@@ -412,7 +412,7 @@ def _launch_claude(extra_args: list[str]) -> None:
         file=sys.stderr,
     )
     print(
-        "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m",
+        "\033[1;31m" + "/" * 56 + "\033[0m",
         file=sys.stderr,
     )
 
@@ -536,7 +536,7 @@ def _cmd_status() -> None:
 
     staleness = db.staleness_minutes()
 
-    print("\033[1;31m━━━ CLOUD WATCHDOG STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    print("\033[1;31m" + "/" * 56 + "\033[0m")
     print(f"\033[31m  Resources:     {resource_count}\033[0m")
     print(f"\033[31m  Relationships: {relationship_count}\033[0m")
     print(
@@ -560,7 +560,7 @@ def _cmd_status() -> None:
         print("\033[31m  Last scan:     never\033[0m")
 
     print(f"\033[31m  Database:      {db.db_path}\033[0m")
-    print("\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    print("\033[1;31m" + "/" * 56 + "\033[0m")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ def main() -> None:
         print_scan_header,
         print_scan_progress,
         print_scan_complete,
+        print_incremental_progress,
         format_warning,
         format_fallback_warning,
     )
@@ -68,10 +69,19 @@ def main() -> None:
 
     db = GraphDB()
 
-    # --- WAKE UP if graph is empty for this provider/account ---
+    # --- WAKE UP if graph is empty or stale for this provider/account ---
     account_key = parsed.profile  # May be None for default credentials.
-    if not db.is_populated_for(parsed.provider, account_key):
-        print_scan_header(parsed.provider.upper())
+    needs_scan = not db.is_populated_for(parsed.provider, account_key)
+    is_refresh = False
+
+    if not needs_scan:
+        stale = db.staleness_minutes(account_key)
+        if stale == -1 or stale > 60:  # No scan log or >1 hour old
+            needs_scan = True
+            is_refresh = True
+
+    if needs_scan:
+        print_scan_header(parsed.provider.upper(), refresh=is_refresh)
 
         def _progress(service_name):
             print_scan_progress(service_name)
@@ -92,6 +102,7 @@ def main() -> None:
                     "environments": {"prod": 0, "staging": 0, "dev": 0, "unknown": 0},
                 }
             print_scan_complete(summary)
+            _sync_if_logged_in(db)
         except Exception as exc:
             logger.warning("Infrastructure scan failed: %s", exc)
             print(
@@ -99,6 +110,8 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.stderr.flush()
+    elif parsed.action_type != "READ":
+        _incremental_discover(parsed, db)
 
     # --- READs pass silently ---
     if parsed.action_type == "READ":
@@ -155,6 +168,98 @@ def main() -> None:
 
 
 _CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".cloud-watchdog", "config.json")
+
+
+def _incremental_discover(parsed, db) -> None:
+    """Run a quick single-service rescan for WRITE/DELETE/ADMIN commands.
+
+    This keeps the graph fresh for the service being modified, without
+    the overhead of a full infrastructure scan.
+    """
+    from watchdog.display import print_incremental_progress
+
+    service = parsed.service
+    if not service:
+        return
+
+    print_incremental_progress(service)
+
+    try:
+        if parsed.provider == "aws":
+            from scanner.aws import scan_aws_service
+            scan_aws_service(
+                db, service,
+                profile=parsed.profile,
+                region=parsed.region,
+            )
+        elif parsed.provider == "gcp":
+            from scanner.gcp import scan_gcp_service
+            scan_gcp_service(db, service, project=parsed.profile)
+    except Exception as exc:
+        logger.warning("Incremental discovery failed for %s: %s", service, exc)
+
+    _sync_if_logged_in(db)
+
+
+def _sync_if_logged_in(db) -> None:
+    """If the user is logged in to Claude Guard, sync local graph to server."""
+    try:
+        with open(_CONFIG_FILE) as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, ValueError, KeyError):
+        return
+
+    server_url = cfg.get("server_url")
+    access_token = cfg.get("access_token")
+    if not server_url or not access_token:
+        return
+
+    try:
+        import requests
+        import sqlite3
+
+        summary = db.get_scan_summary()
+        if summary["resource_count"] == 0:
+            return
+
+        conn = sqlite3.connect(db._db_path)
+        conn.row_factory = sqlite3.Row
+
+        resources = []
+        for row in conn.execute("SELECT * FROM resources"):
+            r = dict(row)
+            for key in ("metadata", "tags"):
+                if r.get(key) and isinstance(r[key], str):
+                    try:
+                        r[key] = json.loads(r[key])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            resources.append(r)
+
+        relationships = []
+        for row in conn.execute("SELECT * FROM relationships"):
+            r = dict(row)
+            if r.get("metadata") and isinstance(r["metadata"], str):
+                try:
+                    r["metadata"] = json.loads(r["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            relationships.append({
+                "source_arn": r["source_arn"],
+                "target_arn": r["target_arn"],
+                "rel_type": r["rel_type"],
+                "metadata": r.get("metadata"),
+            })
+        conn.close()
+
+        requests.post(
+            f"{server_url.rstrip('/')}/api/v1/graph/sync",
+            json={"resources": resources, "relationships": relationships},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.debug("Server sync failed: %s", exc)
 
 
 def _resolve_server_creds() -> tuple[str | None, str | None]:
