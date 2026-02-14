@@ -289,11 +289,46 @@ class TestWakeUpScan:
 
 class TestAuditLog:
 
+    @patch("watchdog.hook._log_assessment_to_server")
     @patch("watchdog.hook._audit_log")
     @patch("watchdog.context.gather_context")
     @patch("scanner.graph.GraphDB")
     def test_audit_log_called_for_write_commands(
-        self, mock_graphdb_cls, mock_gather_ctx, mock_audit
+        self, mock_graphdb_cls, mock_gather_ctx, mock_audit, mock_log_server
+    ):
+        mock_db = MagicMock()
+        mock_db.is_populated_for.return_value = True
+        mock_db.staleness_minutes.return_value = 5
+        mock_graphdb_cls.return_value = mock_db
+
+        # Use a WRITE command with a known target so the deny-on-unknown
+        # path is not triggered.
+        mock_gather_ctx.return_value = {
+            "command": "aws s3 cp file s3://bucket/key",
+            "action_type": "WRITE",
+            "target": {"name": "bucket", "type": "S3 Bucket", "environment": "dev"},
+            "connected_resources": [],
+            "iam_context": None,
+            "network_context": None,
+            "warnings": [],
+        }
+
+        hook_input = _make_hook_input(command="aws s3 cp file s3://bucket/key")
+        _run_hook(hook_input)
+
+        mock_audit.assert_called_once()
+
+
+# =========================================================================
+# Tests: Deny on unknown resource for destructive ops
+# =========================================================================
+
+class TestDenyUnknownResource:
+
+    @patch("watchdog.context.gather_context")
+    @patch("scanner.graph.GraphDB")
+    def test_delete_unknown_resource_denied(
+        self, mock_graphdb_cls, mock_gather_ctx
     ):
         mock_db = MagicMock()
         mock_db.is_populated_for.return_value = True
@@ -301,8 +336,74 @@ class TestAuditLog:
         mock_graphdb_cls.return_value = mock_db
 
         mock_gather_ctx.return_value = {
-            "command": "aws s3 rm s3://bucket --recursive",
+            "command": "aws dynamodb delete-table --table-name unknown-table",
             "action_type": "DELETE",
+            "target": None,
+            "connected_resources": [],
+            "iam_context": None,
+            "network_context": None,
+            "warnings": ["Target resource not found"],
+        }
+
+        hook_input = _make_hook_input(
+            command="aws dynamodb delete-table --table-name unknown-table"
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+
+        assert exit_code == 0
+        assert stdout.strip()
+        response = json.loads(stdout)
+        hook_output = response["hookSpecificOutput"]
+        assert hook_output["permissionDecision"] == "deny"
+        assert "Unknown Resource" in hook_output["permissionDecisionReason"]
+        assert "describe-table" in hook_output["permissionDecisionReason"]
+
+    @patch("watchdog.hook._log_assessment_to_server")
+    @patch("watchdog.context.gather_context")
+    @patch("scanner.graph.GraphDB")
+    def test_delete_known_resource_asks(
+        self, mock_graphdb_cls, mock_gather_ctx, mock_log_server
+    ):
+        """DELETE on a known resource should still produce 'ask', not 'deny'."""
+        mock_db = MagicMock()
+        mock_db.is_populated_for.return_value = True
+        mock_db.staleness_minutes.return_value = 5
+        mock_graphdb_cls.return_value = mock_db
+
+        mock_gather_ctx.return_value = {
+            "command": "aws dynamodb delete-table --table-name known-table",
+            "action_type": "DELETE",
+            "target": {"name": "known-table", "type": "DynamoDB Table", "environment": "dev"},
+            "connected_resources": [],
+            "iam_context": None,
+            "network_context": None,
+            "warnings": [],
+        }
+
+        hook_input = _make_hook_input(
+            command="aws dynamodb delete-table --table-name known-table"
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+
+        assert exit_code == 0
+        response = json.loads(stdout)
+        assert response["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    @patch("watchdog.hook._log_assessment_to_server")
+    @patch("watchdog.context.gather_context")
+    @patch("scanner.graph.GraphDB")
+    def test_write_unknown_resource_still_asks(
+        self, mock_graphdb_cls, mock_gather_ctx, mock_log_server
+    ):
+        """WRITE on an unknown resource should NOT deny — only DELETE/ADMIN deny."""
+        mock_db = MagicMock()
+        mock_db.is_populated_for.return_value = True
+        mock_db.staleness_minutes.return_value = 5
+        mock_graphdb_cls.return_value = mock_db
+
+        mock_gather_ctx.return_value = {
+            "command": "aws s3 cp file s3://bucket/key",
+            "action_type": "WRITE",
             "target": None,
             "connected_resources": [],
             "iam_context": None,
@@ -310,7 +411,9 @@ class TestAuditLog:
             "warnings": [],
         }
 
-        hook_input = _make_hook_input(command="aws s3 rm s3://bucket --recursive")
-        _run_hook(hook_input)
+        hook_input = _make_hook_input(command="aws s3 cp file s3://bucket/key")
+        exit_code, stdout, stderr = _run_hook(hook_input)
 
-        mock_audit.assert_called_once()
+        assert exit_code == 0
+        response = json.loads(stdout)
+        assert response["hookSpecificOutput"]["permissionDecision"] == "ask"

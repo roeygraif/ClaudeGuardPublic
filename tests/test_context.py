@@ -459,6 +459,85 @@ class TestGatherContextWarnings:
         assert any("entire internet" in w.lower() for w in ctx["warnings"])
 
 
+class TestGatherContextDynamoDB:
+    """Test DynamoDB-specific warnings."""
+
+    def test_pitr_disabled_warning_on_delete(self):
+        db = _make_db()
+        # Add a DynamoDB table to resources
+        dynamodb_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/orders"
+        _RESOURCES[dynamodb_arn] = {
+            "arn": dynamodb_arn,
+            "provider": "aws",
+            "service": "dynamodb",
+            "resource_type": "Table",
+            "name": "orders",
+            "region": "us-east-1",
+            "account_or_project": "123456789012",
+            "environment": "prod",
+            "is_active": True,
+            "metadata": {
+                "pitr_enabled": False,
+                "item_count": 50000,
+                "table_size_bytes": 10000000,
+            },
+        }
+        _CONNECTIONS[dynamodb_arn] = []
+
+        parsed = _make_parsed(
+            service="dynamodb",
+            action="delete-table",
+            action_type="DELETE",
+            resource_id="orders",
+            raw_command="aws dynamodb delete-table --table-name orders",
+            flags={"--table-name": "orders"},
+        )
+        ctx = gather_context(parsed, db)
+
+        assert any("pitr" in w.lower() or "point-in-time" in w.lower() for w in ctx["warnings"])
+        assert any("50,000 items" in w for w in ctx["warnings"])
+
+        # Clean up
+        del _RESOURCES[dynamodb_arn]
+        del _CONNECTIONS[dynamodb_arn]
+
+    def test_no_pitr_warning_when_enabled(self):
+        db = _make_db()
+        dynamodb_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/safe-table"
+        _RESOURCES[dynamodb_arn] = {
+            "arn": dynamodb_arn,
+            "provider": "aws",
+            "service": "dynamodb",
+            "resource_type": "Table",
+            "name": "safe-table",
+            "region": "us-east-1",
+            "account_or_project": "123456789012",
+            "environment": "dev",
+            "metadata": {
+                "pitr_enabled": True,
+                "item_count": 0,
+            },
+        }
+        _CONNECTIONS[dynamodb_arn] = []
+
+        parsed = _make_parsed(
+            service="dynamodb",
+            action="delete-table",
+            action_type="DELETE",
+            resource_id="safe-table",
+            raw_command="aws dynamodb delete-table --table-name safe-table",
+            flags={"--table-name": "safe-table"},
+        )
+        ctx = gather_context(parsed, db)
+
+        assert not any("pitr" in w.lower() or "point-in-time" in w.lower() for w in ctx["warnings"])
+        assert not any("items will be permanently" in w.lower() for w in ctx["warnings"])
+
+        # Clean up
+        del _RESOURCES[dynamodb_arn]
+        del _CONNECTIONS[dynamodb_arn]
+
+
 class TestGatherContextNoResourceId:
     """Test behaviour when there is no resource_id (e.g. aws sts get-caller-identity)."""
 

@@ -540,6 +540,23 @@ def _check_warnings(
             )
 
     # ------------------------------------------------------------------
+    # DynamoDB table deletion
+    # ------------------------------------------------------------------
+    if action_type == "DELETE" and service == "dynamodb" and target is not None:
+        meta = target.get("metadata") or {}
+        if isinstance(meta, dict):
+            if not meta.get("pitr_enabled"):
+                warnings.append(
+                    "Point-in-time recovery (PITR) is disabled — "
+                    "data may be unrecoverable after deletion"
+                )
+            item_count = meta.get("item_count", 0)
+            if isinstance(item_count, (int, float)) and item_count > 0:
+                warnings.append(
+                    f"{int(item_count):,} items will be permanently deleted"
+                )
+
+    # ------------------------------------------------------------------
     # S3 bucket deletion
     # ------------------------------------------------------------------
     if action_type == "DELETE" and service == "s3":

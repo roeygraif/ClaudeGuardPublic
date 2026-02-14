@@ -1261,6 +1261,152 @@ def scan_cloudfront(
 
 
 # ---------------------------------------------------------------------------
+# scan_dynamodb
+# ---------------------------------------------------------------------------
+
+def scan_dynamodb(
+    session: boto3.Session, db: GraphDB, region: str, account: str,
+) -> None:
+    """Discover DynamoDB tables, their backups, and Lambda triggers."""
+    try:
+        dynamodb = session.client("dynamodb", region_name=region)
+        table_names: list[str] = []
+        last_evaluated: str | None = None
+
+        while True:
+            if last_evaluated:
+                response = dynamodb.list_tables(ExclusiveStartTableName=last_evaluated)  # HARDCODED
+            else:
+                response = dynamodb.list_tables()  # HARDCODED
+
+            table_names.extend(response.get("TableNames", []))
+            last_evaluated = response.get("LastEvaluatedTableName")
+            if not last_evaluated:
+                break
+
+        for table_name in table_names:
+            try:
+                desc_resp = dynamodb.describe_table(TableName=table_name)  # HARDCODED
+                table = desc_resp.get("Table", {})
+
+                table_arn = table.get("TableArn", _build_arn(
+                    "dynamodb", region, account, "table", table_name,
+                ))
+                table_status = table.get("TableStatus", "")
+                item_count = table.get("ItemCount", 0)
+                table_size = table.get("TableSizeBytes", 0)
+                billing = table.get("BillingModeSummary", {}).get(
+                    "BillingMode", "PROVISIONED"
+                )
+
+                # GSIs and LSIs
+                gsis = table.get("GlobalSecondaryIndexes", [])
+                lsis = table.get("LocalSecondaryIndexes", [])
+
+                # Stream info
+                stream_spec = table.get("StreamSpecification", {})
+                stream_enabled = stream_spec.get("StreamEnabled", False)
+                latest_stream_arn = table.get("LatestStreamArn", "")
+
+                tags: dict[str, str] = {}
+                try:
+                    tags_resp = dynamodb.list_tags_of_resource(ResourceArn=table_arn)  # HARDCODED
+                    tags = {
+                        t["Key"]: t["Value"]
+                        for t in tags_resp.get("Tags", [])
+                    }
+                except (ClientError, BotoCoreError):
+                    pass
+
+                env = classify_environment(tags, table_name)
+
+                # PITR status
+                pitr_enabled = False
+                try:
+                    backup_resp = dynamodb.describe_continuous_backups(
+                        TableName=table_name,
+                    )  # HARDCODED
+                    pitr_desc = backup_resp.get(
+                        "ContinuousBackupsDescription", {},
+                    ).get("PointInTimeRecoveryDescription", {})
+                    pitr_enabled = pitr_desc.get(
+                        "PointInTimeRecoveryStatus", ""
+                    ) == "ENABLED"
+                except (ClientError, BotoCoreError):
+                    pass
+
+                db.upsert_resource({
+                    "arn": table_arn,
+                    "provider": "aws",
+                    "service": "dynamodb",
+                    "resource_type": "Table",
+                    "name": table_name,
+                    "region": region,
+                    "account_or_project": account,
+                    "environment": env,
+                    "tags": tags,
+                    "metadata": {
+                        "table_name": table_name,
+                        "status": table_status,
+                        "item_count": item_count,
+                        "table_size_bytes": table_size,
+                        "billing_mode": billing,
+                        "stream_enabled": stream_enabled,
+                        "pitr_enabled": pitr_enabled,
+                        "gsi_count": len(gsis),
+                        "lsi_count": len(lsis),
+                        "gsi_names": [g.get("IndexName", "") for g in gsis],
+                        "lsi_names": [l.get("IndexName", "") for l in lsis],
+                    },
+                })
+
+                # Lambda triggers via DynamoDB Streams
+                if stream_enabled and latest_stream_arn:
+                    try:
+                        lambda_ = session.client("lambda", region_name=region)
+                        esm_marker: str | None = None
+
+                        while True:
+                            if esm_marker:
+                                esm_resp = lambda_.list_event_source_mappings(
+                                    EventSourceArn=latest_stream_arn,
+                                    Marker=esm_marker,
+                                )  # HARDCODED
+                            else:
+                                esm_resp = lambda_.list_event_source_mappings(
+                                    EventSourceArn=latest_stream_arn,
+                                )  # HARDCODED
+
+                            for mapping in esm_resp.get("EventSourceMappings", []):
+                                func_arn = mapping.get("FunctionArn", "")
+                                if func_arn:
+                                    db.upsert_relationship(
+                                        func_arn, table_arn, "triggered_by",
+                                    )
+
+                            esm_marker = esm_resp.get("NextMarker")
+                            if not esm_marker:
+                                break
+
+                    except (ClientError, BotoCoreError) as esm_exc:
+                        logger.warning(
+                            "Failed to list event source mappings for %s: %s",
+                            table_name, esm_exc,
+                        )
+
+            except (ClientError, BotoCoreError) as desc_exc:
+                logger.warning(
+                    "Failed to describe DynamoDB table %s: %s",
+                    table_name, desc_exc,
+                )
+
+        logger.info("scan_dynamodb completed for region %s", region)
+
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("scan_dynamodb failed for region %s: %s", region, exc)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1276,7 +1422,7 @@ _SERVICE_SCANNERS = {
     "elbv2": scan_elb,
     "route53": scan_route53,
     "cloudfront": scan_cloudfront,
-    "dynamodb": None,  # No scanner yet
+    "dynamodb": scan_dynamodb,
     "sqs": None,
     "sns": None,
 }
@@ -1409,6 +1555,10 @@ def scan_aws(
         if on_progress:
             on_progress("Load Balancers")
         scan_elb(session, db, scan_region, account)
+
+        if on_progress:
+            on_progress("DynamoDB Tables")
+        scan_dynamodb(session, db, scan_region, account)
 
     # ---- Run global scanners ----
     if on_progress:

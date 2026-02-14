@@ -134,10 +134,37 @@ def main() -> None:
 
     # --- WRITE/DELETE/ADMIN: gather context, build deterministic assessment ---
     context = gather_context(parsed, db)
+
+    # --- DENY destructive ops on unknown resources ---
+    target = context.get("target")
+    resource_id = getattr(parsed, "resource_id", None) or ""
+    if (
+        resource_id
+        and target is None
+        and parsed.action_type in ("DELETE", "ADMIN")
+    ):
+        reason = _build_investigation_reason(parsed, context)
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            },
+            sys.stdout,
+        )
+        sys.exit(0)
+
     assessment = _deterministic_assessment(context)
 
     # Log to audit file.
     _audit_log(command, assessment)
+
+    # Log assessment to server (best-effort).
+    _log_assessment_to_server(
+        server_url, server_token, command, parsed, assessment,
+    )
 
     print(format_warning(assessment, parsed), file=sys.stderr)
     sys.stderr.flush()
@@ -399,6 +426,155 @@ def _build_permission_reason(assessment, context: dict) -> str:
                   f"could break.{RESET}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Describe commands for investigation flow
+# ---------------------------------------------------------------------------
+
+_DESCRIBE_COMMANDS: dict[str, list[str]] = {
+    "ec2": [
+        "aws ec2 describe-instances --instance-ids {resource_id}",
+        "aws ec2 describe-instance-status --instance-ids {resource_id}",
+    ],
+    "rds": [
+        "aws rds describe-db-instances --db-instance-identifier {resource_id}",
+    ],
+    "s3": [
+        "aws s3api head-bucket --bucket {resource_id}",
+        "aws s3api get-bucket-versioning --bucket {resource_id}",
+    ],
+    "lambda": [
+        "aws lambda get-function --function-name {resource_id}",
+    ],
+    "iam": [
+        "aws iam get-role --role-name {resource_id}",
+        "aws iam list-attached-role-policies --role-name {resource_id}",
+    ],
+    "dynamodb": [
+        "aws dynamodb describe-table --table-name {resource_id}",
+        "aws dynamodb describe-continuous-backups --table-name {resource_id}",
+    ],
+    "ecs": [
+        "aws ecs describe-services --cluster default --services {resource_id}",
+    ],
+    "eks": [
+        "aws eks describe-cluster --name {resource_id}",
+    ],
+    "elbv2": [
+        "aws elbv2 describe-load-balancers --names {resource_id}",
+    ],
+    "elb": [
+        "aws elbv2 describe-load-balancers --names {resource_id}",
+    ],
+    "route53": [
+        "aws route53 get-hosted-zone --id {resource_id}",
+    ],
+    "cloudfront": [
+        "aws cloudfront get-distribution --id {resource_id}",
+    ],
+    "sqs": [
+        "aws sqs get-queue-attributes --queue-url {resource_id} --attribute-names All",
+    ],
+    "sns": [
+        "aws sns get-topic-attributes --topic-arn {resource_id}",
+    ],
+}
+
+
+def _build_investigation_reason(parsed, context: dict) -> str:
+    """Build a deny reason that tells Claude Code to investigate first.
+
+    When a destructive operation targets an unknown resource, the hook
+    denies the command and returns specific read-only describe commands
+    that Claude Code should run so that incremental discovery can find
+    the resource on the next attempt.
+    """
+    RED = "\033[31m"
+    BOLD_RED = "\033[1;31m"
+    RESET = "\033[0m"
+
+    service = getattr(parsed, "service", "") or ""
+    resource_id = getattr(parsed, "resource_id", "") or ""
+    action_type = getattr(parsed, "action_type", "") or ""
+
+    lines = []
+    lines.append(
+        f"{BOLD_RED}////// CLOUD WATCHDOG — DENIED: Unknown Resource //////{RESET}"
+    )
+    lines.append("")
+    lines.append(
+        f"{RED}A {action_type} operation was attempted on a resource that is "
+        f"not in the infrastructure graph.{RESET}"
+    )
+    lines.append(
+        f"{RED}Service: {service}  |  Resource: {resource_id}{RESET}"
+    )
+    lines.append("")
+    lines.append(
+        f"{BOLD_RED}Before retrying, run these read-only commands to "
+        f"investigate:{RESET}"
+    )
+
+    templates = _DESCRIBE_COMMANDS.get(service.lower(), [])
+    if templates:
+        for tmpl in templates:
+            cmd = tmpl.format(resource_id=resource_id)
+            lines.append(f"{RED}  $ {cmd}{RESET}")
+    else:
+        lines.append(
+            f"{RED}  $ aws {service} describe-* (check the resource exists){RESET}"
+        )
+
+    lines.append("")
+    lines.append(
+        f"{RED}After investigating, re-run the original command. "
+        f"The incremental scanner will pick up the resource and provide "
+        f"full context.{RESET}"
+    )
+
+    return "\n".join(lines)
+
+
+def _log_assessment_to_server(
+    server_url: str | None,
+    server_token: str | None,
+    command: str,
+    parsed,
+    assessment,
+) -> None:
+    """POST the assessment to the server (best-effort, 5s timeout)."""
+    if not server_url or not server_token:
+        return
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "command": command,
+            "action_type": getattr(parsed, "action_type", None),
+            "risk_level": assessment.risk_level,
+            "summary": assessment.summary,
+            "explanation": assessment.explanation,
+            "recommendation": assessment.recommendation,
+            "blast_radius": assessment.blast_radius,
+            "reversible": assessment.reversible,
+        }).encode("utf-8")
+
+        url = f"{server_url.rstrip('/')}/api/v1/assessments"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {server_token}",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass  # Best-effort — never block the hook.
 
 
 def _audit_log(command: str, assessment) -> None:
