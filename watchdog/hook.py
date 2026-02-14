@@ -449,21 +449,25 @@ def _build_permission_reason(assessment) -> str:
     recommendation = getattr(assessment, "recommendation", "")
     reversible = getattr(assessment, "reversible", None)
 
+    RED = "\033[31m"
+    BOLD_RED = "\033[1;31m"
+    RESET = "\033[0m"
+
     lines = []
-    lines.append(f"////// CLOUD WATCHDOG — Risk: {risk} //////")
+    lines.append(f"{BOLD_RED}////// CLOUD WATCHDOG — Risk: {risk} //////{RESET}")
     lines.append("")
     if summary:
-        lines.append(summary)
+        lines.append(f"{RED}{summary}{RESET}")
         lines.append("")
     if cost:
-        lines.append(f"Cost: {cost}")
+        lines.append(f"{RED}Cost: {cost}{RESET}")
     if reversible is not None:
-        lines.append(f"Reversible: {'Yes' if reversible else 'NO'}")
+        lines.append(f"{RED}Reversible: {'Yes' if reversible else 'NO'}{RESET}")
     if blast:
-        lines.append(f"Blast radius: {', '.join(blast[:5])}")
+        lines.append(f"{RED}Blast radius: {', '.join(blast[:5])}{RESET}")
     if recommendation:
         lines.append("")
-        lines.append(f"Recommendation: {recommendation}")
+        lines.append(f"{RED}Recommendation: {recommendation}{RESET}")
 
     return "\n".join(lines)
 

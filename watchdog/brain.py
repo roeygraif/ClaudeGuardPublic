@@ -74,6 +74,11 @@ Your job is to INVESTIGATE first, then report ONLY specific findings.
    - If you find zero activity + no dependencies → LOW
    - If you couldn't gather evidence (tools failed) → default to HIGH with explanation
 
+5. **INVESTIGATE creates too.** A new empty table is LOW risk, but a new IAM policy
+   granting s3:* to a bucket with user data is HIGH. Always check what the created
+   resource connects to or grants access to. Base risk on what you FIND, not the
+   action type alone.
+
 ## What to investigate per action type
 
 **DELETE operations:**
@@ -94,6 +99,15 @@ Your job is to INVESTIGATE first, then report ONLY specific findings.
 - Get the actual policy document being attached/modified
 - List all resources that assume or use the role
 - Check for wildcard permissions (Resource: *)
+
+**CREATE operations:**
+- Check if a resource with the same name/identifier already exists (name collision)
+- For IAM creates (policies, roles): inspect the policy document — check what resources
+  it grants access to, look up those resources in the infrastructure to find sensitive data
+- For networking creates (security groups, VPC peering): check what it opens access to
+- For standalone resources (empty DynamoDB table, test S3 bucket, etc.): if no name
+  conflict and no broad permissions → LOW risk
+- Estimate the monthly cost of the new resource
 
 ## Cost estimates
 - For new resources: estimate monthly cost (e.g., "~$73/month for db.m5.large")
