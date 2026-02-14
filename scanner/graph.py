@@ -1,62 +1,22 @@
 """
-Infrastructure graph backed by SQLite.
+Infrastructure graph backed by the Claude Guard server API.
 
-Stores cloud resources and their relationships in a local SQLite database
-located at ~/.cloud-watchdog/infra.db (configurable).  The schema is
-auto-created on first use.
+Stores cloud resources and relationships in an in-memory buffer during scans,
+then flushes them to the server via POST /api/v1/graph/sync.  Read methods
+query the server directly.
+
+When ``server_url`` is None (offline), write methods still buffer data and
+read methods return empty/default values.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sqlite3
-import threading
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS resources (
-    arn TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    service TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    name TEXT,
-    region TEXT,
-    account_or_project TEXT,
-    environment TEXT,
-    is_active INTEGER,
-    activity_summary TEXT,
-    metadata JSON,
-    tags JSON,
-    last_scanned TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS relationships (
-    source_arn TEXT NOT NULL,
-    target_arn TEXT NOT NULL,
-    rel_type TEXT NOT NULL,
-    metadata JSON,
-    PRIMARY KEY (source_arn, target_arn, rel_type)
-);
-
-CREATE TABLE IF NOT EXISTS scan_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider TEXT,
-    account_or_project TEXT,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    resource_count INTEGER,
-    relationship_count INTEGER
-);
-"""
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +42,6 @@ def classify_environment(tags: dict | None, name: str | None) -> str:
                     return "staging"
                 if lower in ("dev", "development"):
                     return "dev"
-                # If the tag exists but is something unexpected, still
-                # return it normalised to our canonical set if possible,
-                # otherwise fall through to name-based detection.
 
     if name:
         lower_name = name.lower()
@@ -99,338 +56,75 @@ def classify_environment(tags: dict | None, name: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# GraphDB
+# GraphDB — API client + in-memory write buffer
 # ---------------------------------------------------------------------------
 
 class GraphDB:
-    """Thread-safe wrapper around the infrastructure SQLite database."""
+    """API-backed infrastructure graph with an in-memory write buffer.
 
-    _DEFAULT_DIR = os.path.join(Path.home(), ".cloud-watchdog")
-    _DEFAULT_DB = "infra.db"
+    During scans the caller writes resources and relationships into memory.
+    Calling ``flush()`` (or ``log_scan()``) posts them to the server.
+    Read methods hit the server API directly.
+    """
 
-    def __init__(self, db_path: str | None = None) -> None:
-        if db_path is None:
-            os.makedirs(self._DEFAULT_DIR, exist_ok=True)
-            db_path = os.path.join(self._DEFAULT_DIR, self._DEFAULT_DB)
+    def __init__(
+        self,
+        server_url: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        self._server_url = server_url.rstrip("/") if server_url else None
+        self._token = token
 
-        self._db_path: str = db_path
-        self._local = threading.local()
-
-        # Ensure schema exists on initialisation.
-        with self._connect() as conn:
-            conn.executescript(_SCHEMA_SQL)
-
-    # ------------------------------------------------------------------
-    # Connection helpers
-    # ------------------------------------------------------------------
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Return a per-thread cached connection."""
-        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self._db_path, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return conn
-
-    @contextmanager
-    def _connect(self):
-        """Context manager that yields a connection and commits on success."""
-        conn = self._get_connection()
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        # In-memory write buffers (flushed on sync).
+        self._resources: dict[str, dict] = {}
+        self._relationships: list[dict] = []
+        self._scan_provider: str | None = None
+        self._scan_account: str | None = None
 
     # ------------------------------------------------------------------
-    # Internal JSON helpers
+    # HTTP helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _to_json(obj: Any) -> str | None:
-        if obj is None:
-            return None
-        if isinstance(obj, str):
-            # Already serialised — validate then pass through.
-            try:
-                json.loads(obj)
-                return obj
-            except (json.JSONDecodeError, TypeError):
-                return json.dumps(obj)
-        return json.dumps(obj)
+    def _headers(self) -> dict[str, str]:
+        h: dict[str, str] = {}
+        if self._token:
+            h["Authorization"] = f"Bearer {self._token}"
+        return h
 
-    @staticmethod
-    def _from_json(raw: str | None) -> Any:
-        if raw is None:
+    def _get(self, path: str, params: dict | None = None) -> dict | None:
+        """GET request to the server. Returns parsed JSON or None on failure."""
+        if not self._server_url:
             return None
         try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return raw
-
-    def _row_to_dict(self, row: sqlite3.Row | None) -> dict | None:
-        if row is None:
-            return None
-        d = dict(row)
-        # Parse JSON columns back to native types.
-        for key in ("metadata", "tags"):
-            if key in d:
-                d[key] = self._from_json(d[key])
-        return d
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def is_populated(self, account_or_project: str | None = None) -> bool:
-        """Return True if any resources exist, optionally scoped to an account."""
-        with self._connect() as conn:
-            if account_or_project:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM resources WHERE account_or_project = ?",
-                    (account_or_project,),
-                ).fetchone()
-            else:
-                row = conn.execute("SELECT COUNT(*) AS cnt FROM resources").fetchone()
-            return row["cnt"] > 0
-
-    def is_populated_for(self, provider: str, profile: str | None = None) -> bool:
-        """Return True if resources exist for a given provider/account."""
-        with self._connect() as conn:
-            if profile:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM resources "
-                    "WHERE provider = ? AND account_or_project = ?",
-                    (provider, profile),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM resources WHERE provider = ?",
-                    (provider,),
-                ).fetchone()
-            return row["cnt"] > 0
-
-    def staleness_minutes(self, account_or_project: str | None = None) -> int:
-        """Minutes since the last completed scan.  Returns -1 if no scans."""
-        with self._connect() as conn:
-            if account_or_project:
-                row = conn.execute(
-                    "SELECT MAX(completed_at) AS last "
-                    "FROM scan_log WHERE account_or_project = ?",
-                    (account_or_project,),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT MAX(completed_at) AS last FROM scan_log"
-                ).fetchone()
-
-            if row is None or row["last"] is None:
-                return -1
-
-            last_ts = row["last"]
-            if isinstance(last_ts, str):
-                last_dt = datetime.fromisoformat(last_ts)
-            else:
-                last_dt = last_ts
-
-            # Ensure timezone-aware comparison.
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-
-            delta = datetime.now(timezone.utc) - last_dt
-            return int(delta.total_seconds() / 60)
-
-    # ------------------------------------------------------------------
-    # Resource look-up
-    # ------------------------------------------------------------------
-
-    def find_resource(self, identifier: str) -> dict | None:
-        """Search for a resource by ARN (exact), name (exact), or ARN substring."""
-        with self._connect() as conn:
-            # 1. Exact ARN match.
-            row = conn.execute(
-                "SELECT * FROM resources WHERE arn = ?", (identifier,)
-            ).fetchone()
-            if row:
-                return self._row_to_dict(row)
-
-            # 2. Exact name match.
-            row = conn.execute(
-                "SELECT * FROM resources WHERE name = ?", (identifier,)
-            ).fetchone()
-            if row:
-                return self._row_to_dict(row)
-
-            # 3. Substring match on ARN (e.g. resource ID portion).
-            row = conn.execute(
-                "SELECT * FROM resources WHERE arn LIKE ? LIMIT 1",
-                (f"%{identifier}%",),
-            ).fetchone()
-            if row:
-                return self._row_to_dict(row)
-
+            import requests
+            resp = requests.get(
+                f"{self._server_url}{path}",
+                params=params,
+                headers=self._headers(),
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.debug("GET %s returned %s", path, resp.status_code)
+        except Exception as exc:
+            logger.debug("GET %s failed: %s", path, exc)
         return None
 
     # ------------------------------------------------------------------
-    # Graph traversal
-    # ------------------------------------------------------------------
-
-    def get_connections(self, arn: str, hops: int = 2) -> list[dict]:
-        """Return all related resources within *hops* relationship hops.
-
-        Each returned dict contains:
-            arn, resource_type, name, environment, is_active,
-            relationship (rel_type), direction ("outgoing" | "incoming").
-        """
-        visited: set[str] = {arn}
-        results: list[dict] = []
-        frontier: set[str] = {arn}
-
-        with self._connect() as conn:
-            for _ in range(hops):
-                if not frontier:
-                    break
-                next_frontier: set[str] = set()
-                for current in frontier:
-                    # Outgoing edges.
-                    rows = conn.execute(
-                        "SELECT r.arn, r.resource_type, r.name, r.environment, "
-                        "r.is_active, rel.rel_type "
-                        "FROM relationships rel "
-                        "JOIN resources r ON r.arn = rel.target_arn "
-                        "WHERE rel.source_arn = ?",
-                        (current,),
-                    ).fetchall()
-                    for row in rows:
-                        d = dict(row)
-                        target = d["arn"]
-                        if target not in visited:
-                            visited.add(target)
-                            next_frontier.add(target)
-                            results.append({
-                                "arn": d["arn"],
-                                "resource_type": d["resource_type"],
-                                "name": d["name"],
-                                "environment": d["environment"],
-                                "is_active": d["is_active"],
-                                "relationship": d["rel_type"],
-                                "direction": "outgoing",
-                            })
-
-                    # Incoming edges.
-                    rows = conn.execute(
-                        "SELECT r.arn, r.resource_type, r.name, r.environment, "
-                        "r.is_active, rel.rel_type "
-                        "FROM relationships rel "
-                        "JOIN resources r ON r.arn = rel.source_arn "
-                        "WHERE rel.target_arn = ?",
-                        (current,),
-                    ).fetchall()
-                    for row in rows:
-                        d = dict(row)
-                        source = d["arn"]
-                        if source not in visited:
-                            visited.add(source)
-                            next_frontier.add(source)
-                            results.append({
-                                "arn": d["arn"],
-                                "resource_type": d["resource_type"],
-                                "name": d["name"],
-                                "environment": d["environment"],
-                                "is_active": d["is_active"],
-                                "relationship": d["rel_type"],
-                                "direction": "incoming",
-                            })
-
-                frontier = next_frontier
-
-        return results
-
-    def get_dependents(self, arn: str) -> list[dict]:
-        """Return resources that depend on *arn* (incoming relationships)."""
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT r.arn, r.resource_type, r.name, r.environment, "
-                "r.is_active, rel.rel_type "
-                "FROM relationships rel "
-                "JOIN resources r ON r.arn = rel.source_arn "
-                "WHERE rel.target_arn = ?",
-                (arn,),
-            ).fetchall()
-            return [
-                {
-                    "arn": dict(row)["arn"],
-                    "resource_type": dict(row)["resource_type"],
-                    "name": dict(row)["name"],
-                    "environment": dict(row)["environment"],
-                    "is_active": dict(row)["is_active"],
-                    "relationship": dict(row)["rel_type"],
-                    "direction": "incoming",
-                }
-                for row in rows
-            ]
-
-    # ------------------------------------------------------------------
-    # Mutations
+    # Write methods (buffer in memory)
     # ------------------------------------------------------------------
 
     def upsert_resource(self, resource: dict) -> None:
-        """Insert or update a resource record.
-
-        *resource* must contain at least ``arn``, ``provider``, ``service``,
-        and ``resource_type``.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Auto-classify environment if not explicitly provided.
+        """Buffer a resource for later flush."""
         env = resource.get("environment")
         if not env or env == "unknown":
             env = classify_environment(
                 resource.get("tags"), resource.get("name")
             )
+            resource = {**resource, "environment": env}
 
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO resources
-                    (arn, provider, service, resource_type, name, region,
-                     account_or_project, environment, is_active,
-                     activity_summary, metadata, tags, last_scanned)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(arn) DO UPDATE SET
-                    provider          = excluded.provider,
-                    service           = excluded.service,
-                    resource_type     = excluded.resource_type,
-                    name              = COALESCE(excluded.name, resources.name),
-                    region            = COALESCE(excluded.region, resources.region),
-                    account_or_project = COALESCE(excluded.account_or_project, resources.account_or_project),
-                    environment       = excluded.environment,
-                    is_active         = COALESCE(excluded.is_active, resources.is_active),
-                    activity_summary  = COALESCE(excluded.activity_summary, resources.activity_summary),
-                    metadata          = COALESCE(excluded.metadata, resources.metadata),
-                    tags              = COALESCE(excluded.tags, resources.tags),
-                    last_scanned      = excluded.last_scanned
-                """,
-                (
-                    resource["arn"],
-                    resource["provider"],
-                    resource["service"],
-                    resource["resource_type"],
-                    resource.get("name"),
-                    resource.get("region"),
-                    resource.get("account_or_project"),
-                    env,
-                    resource.get("is_active"),
-                    resource.get("activity_summary"),
-                    self._to_json(resource.get("metadata")),
-                    self._to_json(resource.get("tags")),
-                    now,
-                ),
-            )
+        arn = resource["arn"]
+        self._resources[arn] = resource
 
     def upsert_relationship(
         self,
@@ -439,20 +133,16 @@ class GraphDB:
         rel_type: str,
         metadata: dict | None = None,
     ) -> None:
-        """Insert or update a relationship between two resources."""
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO relationships (source_arn, target_arn, rel_type, metadata)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(source_arn, target_arn, rel_type) DO UPDATE SET
-                    metadata = excluded.metadata
-                """,
-                (source_arn, target_arn, rel_type, self._to_json(metadata)),
-            )
+        """Buffer a relationship for later flush."""
+        self._relationships.append({
+            "source_arn": source_arn,
+            "target_arn": target_arn,
+            "rel_type": rel_type,
+            "metadata": metadata,
+        })
 
     # ------------------------------------------------------------------
-    # Scan log
+    # Scan log / flush
     # ------------------------------------------------------------------
 
     def log_scan(
@@ -462,94 +152,127 @@ class GraphDB:
         resource_count: int,
         relationship_count: int,
     ) -> None:
-        """Record a completed scan."""
-        now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO scan_log
-                    (provider, account_or_project, started_at, completed_at,
-                     resource_count, relationship_count)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (provider, account_or_project, now, now, resource_count, relationship_count),
+        """Record a completed scan and flush buffers to the server."""
+        self._scan_provider = provider
+        self._scan_account = account_or_project
+        self.flush()
+
+    def flush(self) -> None:
+        """POST buffered resources and relationships to /api/v1/graph/sync."""
+        if not self._server_url or not self._token:
+            return
+        if not self._resources and not self._relationships:
+            return
+
+        try:
+            import requests
+
+            payload = {
+                "resources": list(self._resources.values()),
+                "relationships": self._relationships,
+                "provider": self._scan_provider,
+                "account_or_project": self._scan_account,
+            }
+            resp = requests.post(
+                f"{self._server_url}/api/v1/graph/sync",
+                json=payload,
+                headers=self._headers(),
+                timeout=60,
             )
+            if resp.status_code == 200:
+                data = resp.json()
+                logger.debug(
+                    "Synced %s resources, %s relationships",
+                    data.get("resources_upserted"),
+                    data.get("relationships_upserted"),
+                )
+            else:
+                logger.debug("Sync failed: %s", resp.status_code)
+        except Exception as exc:
+            logger.debug("Sync failed: %s", exc)
+
+        # Clear buffers after flush attempt.
+        self._resources.clear()
+        self._relationships.clear()
+
+    # ------------------------------------------------------------------
+    # Read methods (hit server API)
+    # ------------------------------------------------------------------
+
+    def find_resource(self, identifier: str) -> dict | None:
+        """Search by ARN, name, or ARN substring."""
+        data = self._get("/api/v1/graph/find-resource", params={"id": identifier})
+        if data:
+            return data.get("resource")
+        return None
+
+    def get_connections(self, arn: str, hops: int = 2) -> list[dict]:
+        """Graph traversal — connected resources up to *hops* hops."""
+        data = self._get("/api/v1/graph/connections", params={"arn": arn, "hops": hops})
+        if data:
+            return data.get("connections", [])
+        return []
+
+    def get_dependents(self, arn: str) -> list[dict]:
+        """Return resources that depend on *arn* (incoming relationships)."""
+        data = self._get("/api/v1/graph/dependents", params={"arn": arn})
+        if data:
+            return data.get("dependents", [])
+        return []
+
+    def is_populated(self, account_or_project: str | None = None) -> bool:
+        """Return True if the org has any resources."""
+        data = self._get(
+            "/api/v1/graph/populated",
+            params={"provider": "aws", "profile": account_or_project},
+        )
+        if data:
+            return data.get("populated", False)
+        return False
+
+    def is_populated_for(self, provider: str, profile: str | None = None) -> bool:
+        """Return True if resources exist for a given provider/account."""
+        params: dict = {"provider": provider}
+        if profile:
+            params["profile"] = profile
+        data = self._get("/api/v1/graph/populated", params=params)
+        if data:
+            return data.get("populated", False)
+        return False
+
+    def staleness_minutes(self, account_or_project: str | None = None) -> int:
+        """Minutes since the last completed scan. Returns -1 if no scans."""
+        params: dict = {}
+        if account_or_project:
+            params["account"] = account_or_project
+        data = self._get("/api/v1/graph/staleness", params=params)
+        if data:
+            return data.get("staleness_minutes", -1)
+        return -1
 
     def get_scan_summary(self) -> dict:
-        """Return an overview of the current graph state.
-
-        Keys: ``resource_count``, ``relationship_count``,
-              ``environment_breakdown``, ``last_scan_time``.
-        """
-        with self._connect() as conn:
-            res_count = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM resources"
-            ).fetchone()["cnt"]
-
-            rel_count = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM relationships"
-            ).fetchone()["cnt"]
-
-            env_rows = conn.execute(
-                "SELECT environment, COUNT(*) AS cnt "
-                "FROM resources GROUP BY environment"
-            ).fetchall()
-            env_breakdown = {row["environment"]: row["cnt"] for row in env_rows}
-
-            last_row = conn.execute(
-                "SELECT MAX(completed_at) AS last FROM scan_log"
-            ).fetchone()
-            last_scan = last_row["last"] if last_row else None
-
+        """Return an overview of the current graph state."""
+        data = self._get("/api/v1/graph/summary")
+        if data:
+            return data
         return {
-            "resource_count": res_count,
-            "relationship_count": rel_count,
-            "environment_breakdown": env_breakdown,
-            "last_scan_time": last_scan,
+            "resource_count": 0,
+            "relationship_count": 0,
+            "environment_breakdown": {},
+            "last_scan_time": None,
         }
-
-    # ------------------------------------------------------------------
-    # Incremental fetch (placeholder)
-    # ------------------------------------------------------------------
 
     def incremental_fetch(
         self, provider: str, service: str, resource_id: str
     ) -> None:
-        """Placeholder -- actual fetching is performed by scanner modules."""
+        """No-op — incremental fetching is handled by scanner modules."""
         return None
 
     # ------------------------------------------------------------------
-    # Clearing data
+    # Clearing data (no-op — server manages data lifecycle)
     # ------------------------------------------------------------------
 
     def clear(self, account_or_project: str | None = None) -> None:
-        """Remove resources and their relationships.
-
-        If *account_or_project* is given, only resources belonging to that
-        account are deleted; otherwise the entire graph is wiped.
-        """
-        with self._connect() as conn:
-            if account_or_project:
-                # Delete relationships that reference the account's resources.
-                conn.execute(
-                    "DELETE FROM relationships WHERE source_arn IN "
-                    "(SELECT arn FROM resources WHERE account_or_project = ?)",
-                    (account_or_project,),
-                )
-                conn.execute(
-                    "DELETE FROM relationships WHERE target_arn IN "
-                    "(SELECT arn FROM resources WHERE account_or_project = ?)",
-                    (account_or_project,),
-                )
-                conn.execute(
-                    "DELETE FROM resources WHERE account_or_project = ?",
-                    (account_or_project,),
-                )
-                conn.execute(
-                    "DELETE FROM scan_log WHERE account_or_project = ?",
-                    (account_or_project,),
-                )
-            else:
-                conn.execute("DELETE FROM relationships")
-                conn.execute("DELETE FROM resources")
-                conn.execute("DELETE FROM scan_log")
+        """Clear local buffers. Server-side data is not affected."""
+        self._resources.clear()
+        self._relationships.clear()

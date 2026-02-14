@@ -1,7 +1,7 @@
 """
 Tests for watchdog.context — context gathering with mock graph data.
 
-Uses an in-memory SQLite-backed GraphDB populated with realistic test data
+Uses a mock GraphDB (API client) populated with realistic test data
 to verify that gather_context correctly builds the context bundle for the
 Claude brain.
 """
@@ -20,15 +20,11 @@ from scanner.graph import GraphDB
 
 
 # =========================================================================
-# Helpers — build a populated in-memory GraphDB
+# Helpers — build a mock GraphDB with sample infrastructure data
 # =========================================================================
 
-def _make_db() -> GraphDB:
-    """Create an in-memory GraphDB with sample infrastructure data."""
-    db = GraphDB(db_path=":memory:")
-
-    # RDS instance (production)
-    db.upsert_resource({
+_RESOURCES = {
+    "arn:aws:rds:us-east-1:123456789012:db/prod-main": {
         "arn": "arn:aws:rds:us-east-1:123456789012:db/prod-main",
         "provider": "aws",
         "service": "rds",
@@ -37,7 +33,7 @@ def _make_db() -> GraphDB:
         "region": "us-east-1",
         "account_or_project": "123456789012",
         "environment": "prod",
-        "is_active": 1,
+        "is_active": True,
         "activity_summary": "342 connections in the last 24 hours",
         "tags": {"Environment": "prod", "Team": "backend"},
         "metadata": {
@@ -46,10 +42,8 @@ def _make_db() -> GraphDB:
             "instance_class": "db.r6g.xlarge",
             "multi_az": True,
         },
-    })
-
-    # Lambda function connected to RDS
-    db.upsert_resource({
+    },
+    "arn:aws:lambda:us-east-1:123456789012:function/api-handler": {
         "arn": "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
         "provider": "aws",
         "service": "lambda",
@@ -58,13 +52,11 @@ def _make_db() -> GraphDB:
         "region": "us-east-1",
         "account_or_project": "123456789012",
         "environment": "prod",
-        "is_active": 1,
+        "is_active": True,
         "activity_summary": "12000 invocations in the last 24 hours",
         "metadata": {"runtime": "python3.11"},
-    })
-
-    # Security Group
-    db.upsert_resource({
+    },
+    "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123": {
         "arn": "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123",
         "provider": "aws",
         "service": "ec2",
@@ -73,16 +65,14 @@ def _make_db() -> GraphDB:
         "region": "us-east-1",
         "account_or_project": "123456789012",
         "environment": "prod",
-        "is_active": 1,
+        "is_active": True,
         "metadata": {
             "ingress_rules": [
                 {"protocol": "tcp", "port": 5432, "cidr": "10.0.0.0/16"},
             ],
         },
-    })
-
-    # IAM Role
-    db.upsert_resource({
+    },
+    "arn:aws:iam::123456789012:role/api-prod": {
         "arn": "arn:aws:iam::123456789012:role/api-prod",
         "provider": "aws",
         "service": "iam",
@@ -91,12 +81,10 @@ def _make_db() -> GraphDB:
         "region": "global",
         "account_or_project": "123456789012",
         "environment": "prod",
-        "is_active": 1,
+        "is_active": True,
         "metadata": {"role_name": "api-prod"},
-    })
-
-    # IAM Policy connected to role
-    db.upsert_resource({
+    },
+    "arn:aws:iam::123456789012:policy/api-prod-policy": {
         "arn": "arn:aws:iam::123456789012:policy/api-prod-policy",
         "provider": "aws",
         "service": "iam",
@@ -106,46 +94,117 @@ def _make_db() -> GraphDB:
         "account_or_project": "123456789012",
         "environment": "prod",
         "metadata": {},
-    })
+    },
+}
 
-    # Relationships
-    # Lambda -> RDS (connects_to)
-    db.upsert_relationship(
-        "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
-        "arn:aws:rds:us-east-1:123456789012:db/prod-main",
-        "connects_to",
-    )
+_CONNECTIONS = {
+    "arn:aws:rds:us-east-1:123456789012:db/prod-main": [
+        {
+            "arn": "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123",
+            "resource_type": "security_group",
+            "name": "rds-sg-prod",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "attached_to",
+            "direction": "outgoing",
+        },
+        {
+            "arn": "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
+            "resource_type": "lambda_function",
+            "name": "api-handler",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "connects_to",
+            "direction": "incoming",
+        },
+    ],
+    "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123": [
+        {
+            "arn": "arn:aws:rds:us-east-1:123456789012:db/prod-main",
+            "resource_type": "db_instance",
+            "name": "prod-main",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "attached_to",
+            "direction": "incoming",
+        },
+        {
+            "arn": "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
+            "resource_type": "lambda_function",
+            "name": "api-handler",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "attached_to",
+            "direction": "incoming",
+        },
+    ],
+    "arn:aws:iam::123456789012:role/api-prod": [
+        {
+            "arn": "arn:aws:iam::123456789012:policy/api-prod-policy",
+            "resource_type": "iam_policy",
+            "name": "api-prod-policy",
+            "environment": "prod",
+            "is_active": None,
+            "relationship": "attached_policy",
+            "direction": "outgoing",
+        },
+        {
+            "arn": "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
+            "resource_type": "lambda_function",
+            "name": "api-handler",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "assumes",
+            "direction": "incoming",
+        },
+    ],
+}
 
-    # RDS -> SG (attached_to)
-    db.upsert_relationship(
-        "arn:aws:rds:us-east-1:123456789012:db/prod-main",
-        "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123",
-        "attached_to",
-    )
+_DEPENDENTS = {
+    "arn:aws:rds:us-east-1:123456789012:db/prod-main": [
+        {
+            "arn": "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
+            "resource_type": "lambda_function",
+            "name": "api-handler",
+            "environment": "prod",
+            "is_active": True,
+            "relationship": "connects_to",
+            "direction": "incoming",
+        },
+    ],
+}
 
-    # Lambda -> SG (attached_to)
-    db.upsert_relationship(
-        "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
-        "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc123",
-        "attached_to",
-    )
 
-    # Role -> Policy (attached_policy)
-    db.upsert_relationship(
-        "arn:aws:iam::123456789012:role/api-prod",
-        "arn:aws:iam::123456789012:policy/api-prod-policy",
-        "attached_policy",
-    )
+def _make_db() -> GraphDB:
+    """Create a mock GraphDB pre-loaded with sample data."""
+    db = GraphDB(server_url=None, token=None)
 
-    # Lambda -> Role (assumes)
-    db.upsert_relationship(
-        "arn:aws:lambda:us-east-1:123456789012:function/api-handler",
-        "arn:aws:iam::123456789012:role/api-prod",
-        "assumes",
-    )
+    def _find(identifier):
+        # Exact ARN
+        if identifier in _RESOURCES:
+            return _RESOURCES[identifier]
+        # Exact name
+        for r in _RESOURCES.values():
+            if r.get("name") == identifier:
+                return r
+        # Substring
+        for arn, r in _RESOURCES.items():
+            if identifier in arn:
+                return r
+        return None
 
-    # Log a scan so staleness is current
-    db.log_scan("aws", "123456789012", 5, 5)
+    def _connections(arn, hops=2):
+        return _CONNECTIONS.get(arn, [])
+
+    def _dependents(arn):
+        return _DEPENDENTS.get(arn, [])
+
+    db.find_resource = _find
+    db.get_connections = _connections
+    db.get_dependents = _dependents
+    db.staleness_minutes = lambda account_or_project=None: 5
+    db.is_populated_for = lambda provider, profile=None: True
+    db.incremental_fetch = lambda provider, service, resource_id: None
 
     return db
 

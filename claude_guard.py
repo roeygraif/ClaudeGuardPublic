@@ -47,6 +47,39 @@ def resolve_api_key() -> str | None:
     if key and key.startswith("sk-ant-"):
         return key
 
+    # 2. macOS Keychain — read Claude Code's stored OAuth token.
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                [
+                    "security", "find-generic-password",
+                    "-s", "Claude Code-credentials",
+                    "-g",
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            # The password line looks like: password: "{"accessToken":"sk-ant-oat01-...",...}"
+            for line in result.stderr.splitlines():
+                if line.strip().startswith("password:"):
+                    # Extract the quoted string after "password: "
+                    import re
+                    match = re.search(r'password:\s*"(.+)"', line)
+                    if not match:
+                        # Try hex-encoded form: password: 0x...
+                        hex_match = re.search(r'password:\s*0x([0-9A-Fa-f]+)', line)
+                        if hex_match:
+                            raw = bytes.fromhex(hex_match.group(1)).decode("utf-8")
+                        else:
+                            break
+                    else:
+                        raw = match.group(1).replace('\\"', '"')
+                    creds = json.loads(raw)
+                    token = creds.get("accessToken", "")
+                    if token.startswith("sk-ant-"):
+                        return token
+        except Exception:
+            logger.debug("Could not read Claude Code credentials from Keychain")
+
     return None
 
 
@@ -192,82 +225,6 @@ def _cmd_logout() -> None:
 # ---------------------------------------------------------------------------
 # Server sync helper
 # ---------------------------------------------------------------------------
-
-def _sync_to_server(cfg: dict) -> None:
-    """Upload local scan results to the Claude Guard server."""
-    from scanner.graph import GraphDB
-    db = GraphDB()
-    summary = db.get_scan_summary()
-
-    if summary["resource_count"] == 0:
-        return
-
-    try:
-        import requests as req
-    except ImportError:
-        return
-
-    # Read all resources and relationships from local SQLite.
-    import sqlite3
-    conn = sqlite3.connect(db._db_path)
-    conn.row_factory = sqlite3.Row
-
-    resources = []
-    for row in conn.execute("SELECT * FROM resources"):
-        r = dict(row)
-        # Parse JSON fields.
-        for key in ("metadata", "tags"):
-            if r.get(key) and isinstance(r[key], str):
-                try:
-                    r[key] = json.loads(r[key])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        resources.append(r)
-
-    relationships = []
-    for row in conn.execute("SELECT * FROM relationships"):
-        r = dict(row)
-        if r.get("metadata") and isinstance(r["metadata"], str):
-            try:
-                r["metadata"] = json.loads(r["metadata"])
-            except (json.JSONDecodeError, TypeError):
-                pass
-        relationships.append({
-            "source_arn": r["source_arn"],
-            "target_arn": r["target_arn"],
-            "rel_type": r["rel_type"],
-            "metadata": r.get("metadata"),
-        })
-    conn.close()
-
-    server_url = cfg.get("server_url", _DEFAULT_SERVER_URL)
-    token = cfg.get("access_token", "")
-
-    try:
-        resp = req.post(
-            f"{server_url}/api/v1/graph/sync",
-            json={"resources": resources, "relationships": relationships},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=60,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            print(
-                f"\033[32m  Synced to server: {data['resources_upserted']} resources, "
-                f"{data['relationships_upserted']} relationships\033[0m",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"\033[33m  Server sync failed: {resp.status_code}\033[0m",
-                file=sys.stderr,
-            )
-    except Exception as exc:
-        print(
-            f"\033[33m  Server sync failed: {exc}\033[0m",
-            file=sys.stderr,
-        )
-
 
 # ---------------------------------------------------------------------------
 # First-run login prompt
@@ -470,7 +427,17 @@ def _cmd_scan(args: list[str]) -> None:
     """Manually refresh the infrastructure graph."""
     from scanner.graph import GraphDB
 
-    db = GraphDB()
+    cfg = _load_config()
+    server_url = cfg.get("server_url")
+    token = cfg.get("access_token")
+    if not server_url or not token:
+        print(
+            "\033[33m  Login required. Run: claude-guard login\033[0m",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    db = GraphDB(server_url=server_url, token=token)
     scan_aws_flag = "--aws" in args or not any(f in args for f in ("--aws", "--gcp"))
     scan_gcp_flag = "--gcp" in args or not any(f in args for f in ("--aws", "--gcp"))
 
@@ -512,11 +479,6 @@ def _cmd_scan(args: list[str]) -> None:
 
     print("\033[32mScan complete.\033[0m", file=sys.stderr)
 
-    # Auto-sync to server if logged in.
-    cfg = _load_config()
-    if cfg.get("access_token"):
-        _sync_to_server(cfg)
-
 
 # ---------------------------------------------------------------------------
 # claude-guard status — show watchdog state
@@ -526,7 +488,11 @@ def _cmd_status() -> None:
     """Show the current state of the watchdog."""
     from scanner.graph import GraphDB
 
-    db = GraphDB()
+    cfg = _load_config()
+    server_url = cfg.get("server_url")
+    token = cfg.get("access_token")
+
+    db = GraphDB(server_url=server_url, token=token)
     summary = db.get_scan_summary()
 
     resource_count = summary["resource_count"]
@@ -537,6 +503,11 @@ def _cmd_status() -> None:
     staleness = db.staleness_minutes()
 
     print("\033[1;31m" + "/" * 56 + "\033[0m")
+    if server_url and token:
+        org_name = cfg.get("org_name", "unknown")
+        print(f"\033[31m  Team:          {org_name}\033[0m")
+    else:
+        print("\033[33m  Not logged in (run: claude-guard login)\033[0m")
     print(f"\033[31m  Resources:     {resource_count}\033[0m")
     print(f"\033[31m  Relationships: {relationship_count}\033[0m")
     print(
@@ -559,7 +530,6 @@ def _cmd_status() -> None:
     else:
         print("\033[31m  Last scan:     never\033[0m")
 
-    print(f"\033[31m  Database:      {db.db_path}\033[0m")
     print("\033[1;31m" + "/" * 56 + "\033[0m")
 
 

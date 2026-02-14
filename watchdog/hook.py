@@ -13,9 +13,11 @@ the tool invocation from stdin as JSON, and:
 5. For READ operations, exits silently (exit 0).
 6. For WRITE/DELETE/ADMIN operations:
    a. Gathers full infrastructure context around the target resource.
-   b. Sends the context to a separate Claude API call for risk analysis.
+   b. Runs a deterministic risk assessment (no external API calls).
    c. Displays the risk assessment in red on stderr.
-   d. Outputs JSON to stdout requesting user confirmation.
+   d. Packs infrastructure context into permissionDecisionReason so
+      Claude Code's active model can reason about the risk.
+   e. Outputs JSON to stdout requesting user confirmation.
 """
 
 from __future__ import annotations
@@ -58,7 +60,6 @@ def main() -> None:
     # --- Import watchdog modules (deferred to avoid startup cost on non-cloud commands) ---
     from watchdog.parser import parse_command
     from watchdog.context import gather_context
-    from watchdog.brain import analyze_risk
     from watchdog.display import (
         print_scan_header,
         print_scan_progress,
@@ -73,7 +74,16 @@ def main() -> None:
     if parsed is None:
         sys.exit(0)  # Not a cloud command.
 
-    db = GraphDB()
+    server_url, server_token = _resolve_server_creds()
+    if not server_url or not server_token:
+        print(
+            "\033[33m  Cloud Watchdog requires login. Run: claude-guard login\033[0m",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+        sys.exit(0)
+
+    db = GraphDB(server_url=server_url, token=server_token)
 
     # --- WAKE UP if graph is empty or stale for this provider/account ---
     account_key = parsed.profile  # May be None for default credentials.
@@ -108,7 +118,6 @@ def main() -> None:
                     "environments": {"prod": 0, "staging": 0, "dev": 0, "unknown": 0},
                 }
             print_scan_complete(summary)
-            _sync_if_logged_in(db)
         except Exception as exc:
             logger.warning("Infrastructure scan failed: %s", exc)
             print(
@@ -123,35 +132,9 @@ def main() -> None:
     if parsed.action_type == "READ":
         sys.exit(0)
 
-    # --- WRITE/DELETE/ADMIN: gather context, ask Claude, show warning ---
-
-    # Server mode: read config file for server URL + tokens.
-    # The config file has a refresh_token so we can recover from expired
-    # access tokens without requiring the user to re-login.
-    server_url, server_token = _resolve_server_creds()
-
-    if server_url and server_token:
-        assessment = _analyze_via_server(server_url, server_token, parsed)
-    else:
-        context = gather_context(parsed, db)
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-
-        aws_session_kwargs = None
-        gcp_project = None
-        if parsed.provider == "aws":
-            aws_session_kwargs = {}
-            if parsed.profile:
-                aws_session_kwargs["profile_name"] = parsed.profile
-            if parsed.region:
-                aws_session_kwargs["region_name"] = parsed.region
-        elif parsed.provider == "gcp":
-            gcp_project = parsed.profile
-
-        assessment = analyze_risk(
-            context, api_key=api_key,
-            aws_session_kwargs=aws_session_kwargs, gcp_project=gcp_project,
-        )
+    # --- WRITE/DELETE/ADMIN: gather context, build deterministic assessment ---
+    context = gather_context(parsed, db)
+    assessment = _deterministic_assessment(context)
 
     # Log to audit file.
     _audit_log(command, assessment)
@@ -160,8 +143,7 @@ def main() -> None:
     sys.stderr.flush()
 
     # Build a rich reason string for Claude Code's confirmation dialog.
-    # This is the ONLY text the user sees, so pack it with key info.
-    reason = _build_permission_reason(assessment)
+    reason = _build_permission_reason(assessment, context)
 
     # Output the hook response to stdout — request user confirmation.
     json.dump(
@@ -208,69 +190,6 @@ def _incremental_discover(parsed, db) -> None:
     except Exception as exc:
         logger.warning("Incremental discovery failed for %s: %s", service, exc)
 
-    _sync_if_logged_in(db)
-
-
-def _sync_if_logged_in(db) -> None:
-    """If the user is logged in to Claude Guard, sync local graph to server."""
-    try:
-        with open(_CONFIG_FILE) as f:
-            cfg = json.load(f)
-    except (FileNotFoundError, ValueError, KeyError):
-        return
-
-    server_url = cfg.get("server_url")
-    access_token = cfg.get("access_token")
-    if not server_url or not access_token:
-        return
-
-    try:
-        import requests
-        import sqlite3
-
-        summary = db.get_scan_summary()
-        if summary["resource_count"] == 0:
-            return
-
-        conn = sqlite3.connect(db._db_path)
-        conn.row_factory = sqlite3.Row
-
-        resources = []
-        for row in conn.execute("SELECT * FROM resources"):
-            r = dict(row)
-            for key in ("metadata", "tags"):
-                if r.get(key) and isinstance(r[key], str):
-                    try:
-                        r[key] = json.loads(r[key])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            resources.append(r)
-
-        relationships = []
-        for row in conn.execute("SELECT * FROM relationships"):
-            r = dict(row)
-            if r.get("metadata") and isinstance(r["metadata"], str):
-                try:
-                    r["metadata"] = json.loads(r["metadata"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            relationships.append({
-                "source_arn": r["source_arn"],
-                "target_arn": r["target_arn"],
-                "rel_type": r["rel_type"],
-                "metadata": r.get("metadata"),
-            })
-        conn.close()
-
-        requests.post(
-            f"{server_url.rstrip('/')}/api/v1/graph/sync",
-            json={"resources": resources, "relationships": relationships},
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=30,
-        )
-    except Exception as exc:
-        logger.debug("Server sync failed: %s", exc)
-
 
 def _resolve_server_creds() -> tuple[str | None, str | None]:
     """Read server URL and access token from the config file.
@@ -296,157 +215,85 @@ def _resolve_server_creds() -> tuple[str | None, str | None]:
     )
 
 
-def _refresh_and_retry(server_url: str, parsed) -> "RiskAssessment | None":
-    """Try to refresh the access token and retry the analysis."""
-    try:
-        import requests
-        with open(_CONFIG_FILE) as f:
-            import json as _json
-            cfg = _json.load(f)
+def _deterministic_assessment(context: dict) -> "RiskAssessment":
+    """Build a risk assessment deterministically from gathered context.
 
-        refresh_token = cfg.get("refresh_token")
-        if not refresh_token:
-            return None
-
-        resp = requests.post(
-            f"{server_url.rstrip('/')}/api/v1/auth/refresh",
-            json={"refresh_token": refresh_token},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            return None
-
-        data = resp.json()
-        new_token = data["access_token"]
-
-        # Save updated tokens.
-        cfg["access_token"] = new_token
-        if data.get("refresh_token"):
-            cfg["refresh_token"] = data["refresh_token"]
-        with open(_CONFIG_FILE, "w") as f:
-            import json as _json
-            _json.dump(cfg, f)
-
-        # Retry analysis with the new token.
-        resp = requests.post(
-            f"{server_url.rstrip('/')}/api/v1/analyze",
-            json={
-                "command": parsed.raw_command,
-                "provider": parsed.provider,
-                "service": parsed.service,
-                "action": parsed.action,
-                "action_type": parsed.action_type,
-                "resource_id": parsed.resource_id,
-                "flags": parsed.flags,
-                "region": parsed.region,
-                "profile": parsed.profile,
-                "warning": getattr(parsed, "warning", None),
-            },
-            headers={"Authorization": f"Bearer {new_token}"},
-            timeout=90,
-        )
-        resp.raise_for_status()
-
-        from watchdog.brain import RiskAssessment
-        d = resp.json()
-        return RiskAssessment(
-            risk_level=d.get("risk_level", "HIGH"),
-            summary=d.get("summary", "Server analysis complete."),
-            blast_radius=d.get("blast_radius", []),
-            explanation=d.get("explanation", ""),
-            reversible=d.get("reversible", False),
-            recommendation=d.get("recommendation", ""),
-            detailed_analysis=d.get("detailed_analysis", ""),
-            cost_estimate=d.get("cost_estimate", ""),
-        )
-    except Exception as exc:
-        logger.warning("Token refresh failed: %s", exc)
-        return None
-
-
-def _analyze_via_server(server_url: str, token: str, parsed) -> "RiskAssessment":
-    """Send analysis request to the Claude Guard server.
-
-    Falls back to a deterministic assessment if the server is unreachable.
+    Uses action type + environment to set risk level, populates blast
+    radius from connected resources, and includes warnings. No API
+    calls, no network — instant.
     """
-    from watchdog.brain import RiskAssessment
+    from watchdog.brain import (
+        RiskAssessment,
+        _ACTION_ENV_RISK_MAP,
+        _ACTION_EXPLANATIONS,
+    )
 
-    try:
-        import requests
+    action_type = str(context.get("action_type", "")).upper()
 
-        resp = requests.post(
-            f"{server_url.rstrip('/')}/api/v1/analyze",
-            json={
-                "command": parsed.raw_command,
-                "provider": parsed.provider,
-                "service": parsed.service,
-                "action": parsed.action,
-                "action_type": parsed.action_type,
-                "resource_id": parsed.resource_id,
-                "flags": parsed.flags,
-                "region": parsed.region,
-                "profile": parsed.profile,
-                "warning": getattr(parsed, "warning", None),
-            },
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=90,
-        )
-        if resp.status_code == 401:
-            # Token expired — try refreshing.
-            refreshed = _refresh_and_retry(server_url, parsed)
-            if refreshed:
-                return refreshed
-            return _fallback_assessment(parsed)
+    # Extract environment from target.
+    target = context.get("target") or {}
+    if isinstance(target, dict):
+        environment = str(target.get("environment", "")).lower()
+    else:
+        environment = ""
 
-        resp.raise_for_status()
-        data = resp.json()
-        return RiskAssessment(
-            risk_level=data.get("risk_level", "HIGH"),
-            summary=data.get("summary", "Server analysis complete."),
-            blast_radius=data.get("blast_radius", []),
-            explanation=data.get("explanation", ""),
-            reversible=data.get("reversible", False),
-            recommendation=data.get("recommendation", ""),
-            detailed_analysis=data.get("detailed_analysis", ""),
-            cost_estimate=data.get("cost_estimate", ""),
-        )
-    except Exception as exc:
-        logger.warning("Server analysis failed: %s — using fallback", exc)
-        return _fallback_assessment(parsed)
+    # Look up risk level.
+    risk_level = (
+        _ACTION_ENV_RISK_MAP.get((action_type, environment))
+        or _ACTION_ENV_RISK_MAP.get((action_type, "_default"))
+    )
+    if risk_level is None:
+        risk_level = "LOW"
 
+    # Build blast radius from connected resources.
+    connected = context.get("connected_resources") or []
+    blast_radius = []
+    for res in connected:
+        res_type = res.get("type", "resource")
+        res_rel = res.get("relationship", "connected")
+        res_arn = res.get("arn", "")
+        # Use ARN's last segment as name if no better label.
+        name = res_arn.rsplit("/", 1)[-1] if "/" in res_arn else res_arn.rsplit(":", 1)[-1] if ":" in res_arn else res_arn
+        if name:
+            blast_radius.append(f"{res_type}: {name} ({res_rel})")
+        else:
+            blast_radius.append(f"{res_type} ({res_rel})")
 
-def _fallback_assessment(parsed) -> "RiskAssessment":
-    """Deterministic fallback when the server is unreachable."""
-    from watchdog.brain import RiskAssessment
+    # Build summary from warnings.
+    warnings = context.get("warnings") or []
+    if warnings:
+        summary = "; ".join(warnings[:3])
+    else:
+        target_name = target.get("name", "") if isinstance(target, dict) else ""
+        summary = f"{action_type} operation on {target_name}" if target_name else f"{action_type} operation"
 
-    action_type = getattr(parsed, "action_type", "WRITE")
+    explanation = _ACTION_EXPLANATIONS.get(
+        action_type,
+        "An operation was requested. Review carefully before proceeding.",
+    )
+
+    reversible = action_type != "DELETE"
+
     return RiskAssessment(
-        risk_level="HIGH" if action_type in ("DELETE", "ADMIN") else "MEDIUM",
-        summary=(
-            "Cloud Watchdog server unreachable — basic risk assessment "
-            "based on action type."
-        ),
-        blast_radius=[],
-        explanation=(
-            f"A {action_type} operation was requested. The analysis server "
-            "could not be reached, so this is a conservative assessment."
-        ),
-        reversible=action_type != "DELETE",
-        recommendation="Verify the command manually before proceeding.",
+        risk_level=risk_level,
+        summary=summary,
+        blast_radius=blast_radius,
+        explanation=explanation,
+        reversible=reversible,
+        recommendation="Review the infrastructure context below before proceeding.",
     )
 
 
-def _build_permission_reason(assessment) -> str:
-    """Build a rich multi-line reason for Claude Code's confirmation dialog.
+def _build_permission_reason(assessment, context: dict) -> str:
+    """Build a rich permission reason with infrastructure context.
 
-    This is the only text the user sees in the permission prompt, so we
-    include risk level, cost, blast radius, and recommendation.
+    This text is set as ``permissionDecisionReason`` in the hook
+    response. Claude Code's active model sees this field and uses
+    the infrastructure context to inform the user about risks.
     """
     risk = getattr(assessment, "risk_level", "UNKNOWN")
     summary = getattr(assessment, "summary", "")
-    cost = getattr(assessment, "cost_estimate", "")
     blast = getattr(assessment, "blast_radius", []) or []
-    recommendation = getattr(assessment, "recommendation", "")
     reversible = getattr(assessment, "reversible", None)
 
     RED = "\033[31m"
@@ -456,18 +303,100 @@ def _build_permission_reason(assessment) -> str:
     lines = []
     lines.append(f"{BOLD_RED}////// CLOUD WATCHDOG — Risk: {risk} //////{RESET}")
     lines.append("")
+
     if summary:
         lines.append(f"{RED}{summary}{RESET}")
         lines.append("")
-    if cost:
-        lines.append(f"{RED}Cost: {cost}{RESET}")
+
+    # --- Target resource details ---
+    target = context.get("target")
+    if isinstance(target, dict) and target:
+        lines.append(f"{RED}Target Resource:{RESET}")
+        if target.get("name"):
+            lines.append(f"{RED}  Name: {target['name']}{RESET}")
+        if target.get("type"):
+            lines.append(f"{RED}  Type: {target['type']}{RESET}")
+        if target.get("environment"):
+            lines.append(f"{RED}  Environment: {target['environment']}{RESET}")
+        if target.get("is_active"):
+            activity = target.get("activity", "active")
+            lines.append(f"{RED}  Status: ACTIVE ({activity}){RESET}")
+        lines.append("")
+
+    # --- Connected resources (blast radius) ---
+    connected = context.get("connected_resources") or []
+    if connected:
+        lines.append(f"{RED}Connected Resources ({len(connected)}):{RESET}")
+        for res in connected[:8]:
+            res_type = res.get("type", "resource")
+            res_rel = res.get("relationship", "connected")
+            res_arn = res.get("arn", "")
+            name = res_arn.rsplit("/", 1)[-1] if "/" in res_arn else res_arn.rsplit(":", 1)[-1] if ":" in res_arn else res_arn
+            lines.append(f"{RED}  - {res_type}: {name} ({res_rel}){RESET}")
+        if len(connected) > 8:
+            lines.append(f"{RED}  ... and {len(connected) - 8} more{RESET}")
+        lines.append("")
+
+    # --- Warnings ---
+    warnings = context.get("warnings") or []
+    if warnings:
+        lines.append(f"{BOLD_RED}Warnings:{RESET}")
+        for w in warnings:
+            lines.append(f"{RED}  - {w}{RESET}")
+        lines.append("")
+
+    # --- IAM context ---
+    iam = context.get("iam_context")
+    if isinstance(iam, dict) and iam:
+        lines.append(f"{RED}IAM Context:{RESET}")
+        if iam.get("role"):
+            lines.append(f"{RED}  Role: {iam['role']}{RESET}")
+        policies = iam.get("current_policies") or []
+        if policies:
+            lines.append(f"{RED}  Current policies: {len(policies)}{RESET}")
+            for p in policies[:5]:
+                p_arn = p.get("arn", "")
+                p_name = p_arn.rsplit("/", 1)[-1] if "/" in p_arn else p_arn
+                lines.append(f"{RED}    - {p_name}{RESET}")
+        using = iam.get("resources_using_role") or []
+        if using:
+            lines.append(f"{RED}  Resources using this role: {len(using)}{RESET}")
+            for r in using[:5]:
+                r_type = r.get("type", "resource")
+                r_arn = r.get("arn", "")
+                r_name = r_arn.rsplit("/", 1)[-1] if "/" in r_arn else r_arn
+                lines.append(f"{RED}    - {r_type}: {r_name}{RESET}")
+        policy_attached = iam.get("policy_being_attached")
+        if isinstance(policy_attached, dict) and policy_attached:
+            lines.append(f"{RED}  Policy being attached: {policy_attached.get('name', policy_attached.get('arn', ''))}{RESET}")
+        lines.append("")
+
+    # --- Network context ---
+    net = context.get("network_context")
+    if isinstance(net, dict) and net:
+        lines.append(f"{RED}Network Context:{RESET}")
+        if net.get("security_group"):
+            lines.append(f"{RED}  Security Group: {net['security_group']}{RESET}")
+        rules = net.get("current_rules") or []
+        if rules:
+            lines.append(f"{RED}  Current rules: {len(rules)}{RESET}")
+        attached = net.get("attached_resources") or []
+        if attached:
+            lines.append(f"{RED}  Attached to {len(attached)} resources{RESET}")
+        rule_added = net.get("rule_being_added")
+        if isinstance(rule_added, dict) and rule_added:
+            lines.append(f"{RED}  Rule being added: {json.dumps(rule_added)}{RESET}")
+        lines.append("")
+
+    # --- Reversibility ---
     if reversible is not None:
         lines.append(f"{RED}Reversible: {'Yes' if reversible else 'NO'}{RESET}")
-    if blast:
-        lines.append(f"{RED}Blast radius: {', '.join(blast[:5])}{RESET}")
-    if recommendation:
         lines.append("")
-        lines.append(f"{RED}Recommendation: {recommendation}{RESET}")
+
+    # --- Instruction for Claude Code's model ---
+    lines.append(f"{BOLD_RED}You are Cloud Watchdog. Based on the infrastructure context above, "
+                  f"explain the risks of this command to the user. Be specific about what "
+                  f"could break.{RESET}")
 
     return "\n".join(lines)
 
