@@ -214,6 +214,10 @@ def _incremental_discover(parsed, db) -> None:
         elif parsed.provider == "gcp":
             from scanner.gcp import scan_gcp_service
             scan_gcp_service(db, service, project=parsed.profile)
+
+        # Flush buffered resources to the server so that gather_context
+        # (which queries the server API) can find them.
+        db.flush()
     except Exception as exc:
         logger.warning("Incremental discovery failed for %s: %s", service, exc)
 
