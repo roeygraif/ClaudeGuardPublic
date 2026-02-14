@@ -225,17 +225,33 @@ def _incremental_discover(parsed, db) -> None:
 def _resolve_server_creds() -> tuple[str | None, str | None]:
     """Read server URL and access token from the config file.
 
+    If the access token is expired, attempts to refresh it using the
+    stored refresh_token and writes the new tokens back to disk.
     Falls back to env vars for backwards compatibility.
     """
-    # Try config file first (has refresh_token for auto-renewal).
+    # Try config file first.
     try:
         with open(_CONFIG_FILE) as f:
             import json as _json
             cfg = _json.load(f)
         server_url = cfg.get("server_url")
         access_token = cfg.get("access_token")
-        if server_url and access_token:
-            return server_url, access_token
+        if not server_url or not access_token:
+            raise ValueError("missing creds")
+
+        # Quick check: is the token still valid?
+        if _token_needs_refresh(server_url, access_token):
+            refreshed = _refresh_access_token(server_url, cfg.get("refresh_token"))
+            if refreshed:
+                access_token = refreshed
+                cfg["access_token"] = access_token
+                try:
+                    with open(_CONFIG_FILE, "w") as f:
+                        _json.dump(cfg, f, indent=2)
+                except Exception:
+                    pass
+
+        return server_url, access_token
     except (FileNotFoundError, ValueError, KeyError):
         pass
 
@@ -244,6 +260,45 @@ def _resolve_server_creds() -> tuple[str | None, str | None]:
         os.environ.get("GUARD_SERVER_URL"),
         os.environ.get("GUARD_TOKEN"),
     )
+
+
+def _token_needs_refresh(server_url: str, token: str) -> bool:
+    """Return True if the access token is expired or invalid."""
+    try:
+        import urllib.request
+        import urllib.error
+
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/api/v1/graph/populated?provider=aws",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+        return False  # Token works.
+    except urllib.error.HTTPError as e:
+        return e.code == 401
+    except Exception:
+        return False  # Network error — don't try to refresh.
+
+
+def _refresh_access_token(server_url: str, refresh_token: str | None) -> str | None:
+    """Call the refresh endpoint and return the new access token."""
+    if not refresh_token:
+        return None
+    try:
+        import urllib.request
+
+        payload = json.dumps({"refresh_token": refresh_token}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/api/v1/auth/refresh",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode("utf-8"))
+        return data.get("access_token")
+    except Exception:
+        return None
 
 
 def _deterministic_assessment(context: dict) -> "RiskAssessment":
