@@ -1407,6 +1407,233 @@ def scan_dynamodb(
 
 
 # ---------------------------------------------------------------------------
+# scan_sns
+# ---------------------------------------------------------------------------
+
+def scan_sns(
+    session: boto3.Session, db: GraphDB, region: str, account: str,
+) -> None:
+    """Discover SNS topics and their subscriptions."""
+    try:
+        sns = session.client("sns", region_name=region)
+        next_token: str | None = None
+        topic_arns: list[str] = []
+
+        while True:
+            if next_token:
+                resp = sns.list_topics(NextToken=next_token)  # HARDCODED
+            else:
+                resp = sns.list_topics()  # HARDCODED
+
+            for topic in resp.get("Topics", []):
+                topic_arns.append(topic["TopicArn"])
+
+            next_token = resp.get("NextToken")
+            if not next_token:
+                break
+
+        for topic_arn in topic_arns:
+            try:
+                # Get topic attributes
+                attrs_resp = sns.get_topic_attributes(TopicArn=topic_arn)  # HARDCODED
+                attrs = attrs_resp.get("Attributes", {})
+
+                topic_name = topic_arn.rsplit(":", 1)[-1]
+
+                tags: dict[str, str] = {}
+                try:
+                    tags_resp = sns.list_tags_for_resource(ResourceArn=topic_arn)  # HARDCODED
+                    tags = {
+                        t["Key"]: t["Value"]
+                        for t in tags_resp.get("Tags", [])
+                    }
+                except (ClientError, BotoCoreError):
+                    pass
+
+                env = classify_environment(tags, topic_name)
+
+                db.upsert_resource({
+                    "arn": topic_arn,
+                    "provider": "aws",
+                    "service": "sns",
+                    "resource_type": "Topic",
+                    "name": topic_name,
+                    "region": region,
+                    "account_or_project": account,
+                    "environment": env,
+                    "tags": tags,
+                    "metadata": {
+                        "topic_name": topic_name,
+                        "display_name": attrs.get("DisplayName", ""),
+                        "subscriptions_confirmed": int(attrs.get("SubscriptionsConfirmed", 0)),
+                        "subscriptions_pending": int(attrs.get("SubscriptionsPending", 0)),
+                        "kms_master_key_id": attrs.get("KmsMasterKeyId", ""),
+                        "policy": attrs.get("Policy", ""),
+                    },
+                })
+
+                # Discover subscriptions for this topic
+                sub_token: str | None = None
+                while True:
+                    if sub_token:
+                        sub_resp = sns.list_subscriptions_by_topic(
+                            TopicArn=topic_arn, NextToken=sub_token,
+                        )  # HARDCODED
+                    else:
+                        sub_resp = sns.list_subscriptions_by_topic(
+                            TopicArn=topic_arn,
+                        )  # HARDCODED
+
+                    for sub in sub_resp.get("Subscriptions", []):
+                        protocol = sub.get("Protocol", "")
+                        endpoint = sub.get("Endpoint", "")
+
+                        if protocol == "lambda" and endpoint.startswith("arn:"):
+                            db.upsert_relationship(endpoint, topic_arn, "subscribes_to")
+                        elif protocol == "sqs" and endpoint.startswith("arn:"):
+                            db.upsert_relationship(endpoint, topic_arn, "subscribes_to")
+
+                    sub_token = sub_resp.get("NextToken")
+                    if not sub_token:
+                        break
+
+            except (ClientError, BotoCoreError) as topic_exc:
+                logger.warning(
+                    "Failed to describe SNS topic %s: %s",
+                    topic_arn, topic_exc,
+                )
+
+        logger.info("scan_sns completed for region %s", region)
+
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("scan_sns failed for region %s: %s", region, exc)
+
+
+# ---------------------------------------------------------------------------
+# scan_sqs
+# ---------------------------------------------------------------------------
+
+def scan_sqs(
+    session: boto3.Session, db: GraphDB, region: str, account: str,
+) -> None:
+    """Discover SQS queues, their DLQ relationships, and Lambda triggers."""
+    try:
+        sqs = session.client("sqs", region_name=region)
+        next_token: str | None = None
+        queue_urls: list[str] = []
+
+        while True:
+            if next_token:
+                resp = sqs.list_queues(NextToken=next_token)  # HARDCODED
+            else:
+                resp = sqs.list_queues()  # HARDCODED
+
+            queue_urls.extend(resp.get("QueueUrls", []))
+
+            next_token = resp.get("NextToken")
+            if not next_token:
+                break
+
+        for queue_url in queue_urls:
+            try:
+                # Get queue attributes
+                attrs_resp = sqs.get_queue_attributes(
+                    QueueUrl=queue_url, AttributeNames=["All"],
+                )  # HARDCODED
+                attrs = attrs_resp.get("Attributes", {})
+
+                queue_arn = attrs.get("QueueArn", "")
+                queue_name = queue_url.rsplit("/", 1)[-1]
+
+                tags: dict[str, str] = {}
+                try:
+                    tags_resp = sqs.list_queue_tags(QueueUrl=queue_url)  # HARDCODED
+                    tags = tags_resp.get("Tags", {})
+                except (ClientError, BotoCoreError):
+                    pass
+
+                env = classify_environment(tags, queue_name)
+
+                db.upsert_resource({
+                    "arn": queue_arn,
+                    "provider": "aws",
+                    "service": "sqs",
+                    "resource_type": "Queue",
+                    "name": queue_name,
+                    "region": region,
+                    "account_or_project": account,
+                    "environment": env,
+                    "tags": tags,
+                    "metadata": {
+                        "queue_name": queue_name,
+                        "queue_url": queue_url,
+                        "approximate_message_count": int(attrs.get("ApproximateNumberOfMessages", 0)),
+                        "approximate_not_visible": int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0)),
+                        "visibility_timeout": attrs.get("VisibilityTimeout", ""),
+                        "delay_seconds": attrs.get("DelaySeconds", ""),
+                        "fifo_queue": attrs.get("FifoQueue", "false") == "true",
+                        "kms_master_key_id": attrs.get("KmsMasterKeyId", ""),
+                    },
+                })
+
+                # Parse redrive policy for DLQ relationship
+                redrive_policy_str = attrs.get("RedrivePolicy", "")
+                if redrive_policy_str:
+                    try:
+                        redrive = json.loads(redrive_policy_str)
+                        dlq_arn = redrive.get("deadLetterTargetArn", "")
+                        if dlq_arn:
+                            db.upsert_relationship(queue_arn, dlq_arn, "dead_letter_to")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Lambda triggers via event source mappings
+                if queue_arn:
+                    try:
+                        lambda_ = session.client("lambda", region_name=region)
+                        esm_marker: str | None = None
+
+                        while True:
+                            if esm_marker:
+                                esm_resp = lambda_.list_event_source_mappings(
+                                    EventSourceArn=queue_arn,
+                                    Marker=esm_marker,
+                                )  # HARDCODED
+                            else:
+                                esm_resp = lambda_.list_event_source_mappings(
+                                    EventSourceArn=queue_arn,
+                                )  # HARDCODED
+
+                            for mapping in esm_resp.get("EventSourceMappings", []):
+                                func_arn = mapping.get("FunctionArn", "")
+                                if func_arn:
+                                    db.upsert_relationship(
+                                        func_arn, queue_arn, "triggered_by",
+                                    )
+
+                            esm_marker = esm_resp.get("NextMarker")
+                            if not esm_marker:
+                                break
+
+                    except (ClientError, BotoCoreError) as esm_exc:
+                        logger.warning(
+                            "Failed to list event source mappings for queue %s: %s",
+                            queue_name, esm_exc,
+                        )
+
+            except (ClientError, BotoCoreError) as q_exc:
+                logger.warning(
+                    "Failed to describe SQS queue %s: %s",
+                    queue_url, q_exc,
+                )
+
+        logger.info("scan_sqs completed for region %s", region)
+
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("scan_sqs failed for region %s: %s", region, exc)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1423,8 +1650,8 @@ _SERVICE_SCANNERS = {
     "route53": scan_route53,
     "cloudfront": scan_cloudfront,
     "dynamodb": scan_dynamodb,
-    "sqs": None,
-    "sns": None,
+    "sqs": scan_sqs,
+    "sns": scan_sns,
 }
 
 
@@ -1559,6 +1786,14 @@ def scan_aws(
         if on_progress:
             on_progress("DynamoDB Tables")
         scan_dynamodb(session, db, scan_region, account)
+
+        if on_progress:
+            on_progress("SNS Topics")
+        scan_sns(session, db, scan_region, account)
+
+        if on_progress:
+            on_progress("SQS Queues")
+        scan_sqs(session, db, scan_region, account)
 
     # ---- Run global scanners ----
     if on_progress:

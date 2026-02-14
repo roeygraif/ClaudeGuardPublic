@@ -289,7 +289,7 @@ class TestWakeUpScan:
 
 class TestAuditLog:
 
-    @patch("watchdog.hook._log_assessment_to_server")
+    @patch("watchdog.hook._analyze_on_server", return_value=None)
     @patch("watchdog.hook._audit_log")
     @patch("watchdog.context.gather_context")
     @patch("scanner.graph.GraphDB")
@@ -358,7 +358,7 @@ class TestDenyUnknownResource:
         assert "Unknown Resource" in hook_output["permissionDecisionReason"]
         assert "describe-table" in hook_output["permissionDecisionReason"]
 
-    @patch("watchdog.hook._log_assessment_to_server")
+    @patch("watchdog.hook._analyze_on_server", return_value=None)
     @patch("watchdog.context.gather_context")
     @patch("scanner.graph.GraphDB")
     def test_delete_known_resource_asks(
@@ -389,7 +389,7 @@ class TestDenyUnknownResource:
         response = json.loads(stdout)
         assert response["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    @patch("watchdog.hook._log_assessment_to_server")
+    @patch("watchdog.hook._analyze_on_server", return_value=None)
     @patch("watchdog.context.gather_context")
     @patch("scanner.graph.GraphDB")
     def test_write_unknown_resource_still_asks(

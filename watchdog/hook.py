@@ -156,15 +156,13 @@ def main() -> None:
         )
         sys.exit(0)
 
-    assessment = _deterministic_assessment(context)
+    # Try Gemini agent on the server; fall back to deterministic.
+    assessment = _analyze_on_server(server_url, server_token, parsed)
+    if assessment is None:
+        assessment = _deterministic_assessment(context)
 
     # Log to audit file.
     _audit_log(command, assessment)
-
-    # Log assessment to server (best-effort).
-    _log_assessment_to_server(
-        server_url, server_token, command, parsed, assessment,
-    )
 
     print(format_warning(assessment, parsed), file=sys.stderr)
     sys.stderr.flush()
@@ -297,6 +295,65 @@ def _refresh_access_token(server_url: str, refresh_token: str | None) -> str | N
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read().decode("utf-8"))
         return data.get("access_token")
+    except Exception:
+        return None
+
+
+def _analyze_on_server(
+    server_url: str | None,
+    server_token: str | None,
+    parsed,
+) -> "RiskAssessment | None":
+    """POST to /api/v1/analyze and return a RiskAssessment, or None on failure.
+
+    The server runs a Gemini agent with infrastructure graph tools to
+    produce an informed risk assessment.  Timeout is 15s to allow for
+    multiple tool-call rounds.
+    """
+    if not server_url or not server_token:
+        return None
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        from watchdog.brain import RiskAssessment
+
+        payload = json.dumps({
+            "provider": getattr(parsed, "provider", None),
+            "service": getattr(parsed, "service", None),
+            "action": getattr(parsed, "action", None),
+            "action_type": getattr(parsed, "action_type", None),
+            "resource_id": getattr(parsed, "resource_id", None),
+            "command": getattr(parsed, "raw_command", ""),
+            "flags": getattr(parsed, "flags", {}),
+            "region": getattr(parsed, "region", None),
+            "profile": getattr(parsed, "profile", None),
+        }).encode("utf-8")
+
+        url = f"{server_url.rstrip('/')}/api/v1/analyze"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {server_token}",
+            },
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read().decode("utf-8"))
+
+        return RiskAssessment(
+            risk_level=data.get("risk_level", "MEDIUM"),
+            summary=data.get("summary", ""),
+            blast_radius=data.get("blast_radius", []),
+            explanation=data.get("explanation", ""),
+            reversible=data.get("reversible", True),
+            recommendation=data.get("recommendation", ""),
+            detailed_analysis=data.get("detailed_analysis", ""),
+            cost_estimate=data.get("cost_estimate", ""),
+        )
     except Exception:
         return None
 
@@ -593,47 +650,6 @@ def _build_investigation_reason(parsed, context: dict) -> str:
     )
 
     return "\n".join(lines)
-
-
-def _log_assessment_to_server(
-    server_url: str | None,
-    server_token: str | None,
-    command: str,
-    parsed,
-    assessment,
-) -> None:
-    """POST the assessment to the server (best-effort, 5s timeout)."""
-    if not server_url or not server_token:
-        return
-
-    try:
-        import urllib.request
-        import urllib.error
-
-        payload = json.dumps({
-            "command": command,
-            "action_type": getattr(parsed, "action_type", None),
-            "risk_level": assessment.risk_level,
-            "summary": assessment.summary,
-            "explanation": assessment.explanation,
-            "recommendation": assessment.recommendation,
-            "blast_radius": assessment.blast_radius,
-            "reversible": assessment.reversible,
-        }).encode("utf-8")
-
-        url = f"{server_url.rstrip('/')}/api/v1/assessments"
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {server_token}",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except Exception:
-        pass  # Best-effort — never block the hook.
 
 
 def _audit_log(command: str, assessment) -> None:
