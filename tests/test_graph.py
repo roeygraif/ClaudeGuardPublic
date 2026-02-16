@@ -244,3 +244,141 @@ class TestLogging:
 
         assert any("sync failed" in r.message.lower() for r in caplog.records)
         assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+# =========================================================================
+# Tests: classify_environment
+# =========================================================================
+
+from scanner.graph import classify_environment
+
+
+class TestClassifyEnvironment:
+    def test_tag_environment_prod(self):
+        assert classify_environment({"Environment": "production"}, None) == "prod"
+
+    def test_tag_env_key_staging(self):
+        assert classify_environment({"env": "staging"}, None) == "staging"
+
+    def test_tag_dev(self):
+        assert classify_environment({"environment": "development"}, None) == "dev"
+
+    def test_name_pattern_prod(self):
+        assert classify_environment(None, "api-production-us") == "prod"
+
+    def test_name_pattern_staging(self):
+        assert classify_environment(None, "my-stag-server") == "staging"
+
+    def test_name_pattern_dev(self):
+        assert classify_environment(None, "dev-worker") == "dev"
+
+    def test_no_tags_no_name(self):
+        assert classify_environment(None, None) == "unknown"
+
+    def test_tag_takes_priority_over_name(self):
+        assert classify_environment({"Environment": "production"}, "dev-worker") == "prod"
+
+
+# =========================================================================
+# Tests: offline mode (server_url=None)
+# =========================================================================
+
+class TestOfflineMode:
+    def test_get_returns_none_offline(self):
+        db = GraphDB(server_url=None, token=None)
+        assert db._get("/api/v1/graph/populated") is None
+
+    def test_flush_noop_offline(self):
+        db = GraphDB(server_url=None, token=None)
+        db.upsert_resource(_make_resource("arn:1"))
+        db.flush()  # Should not crash
+        assert len(db._resources) == 1  # Buffers retained (no server)
+
+    def test_find_resource_checks_local_only_offline(self):
+        db = GraphDB(server_url=None, token=None)
+        db.upsert_resource(_make_resource("arn:aws:rds:us-east-1:123:db/mydb"))
+        found = db.find_resource("arn:aws:rds:us-east-1:123:db/mydb")
+        assert found is not None
+        assert found["arn"] == "arn:aws:rds:us-east-1:123:db/mydb"
+
+
+# =========================================================================
+# Tests: read methods via mocked _get
+# =========================================================================
+
+class TestReadMethods:
+    @patch.object(GraphDB, "_get")
+    def test_get_connections_returns_list(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = {"connections": [{"arn": "B", "direction": "outgoing"}]}
+        result = db.get_connections("arn:A", hops=2)
+        assert result == [{"arn": "B", "direction": "outgoing"}]
+
+    @patch.object(GraphDB, "_get")
+    def test_get_connections_empty_on_failure(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = None
+        result = db.get_connections("arn:A")
+        assert result == []
+
+    @patch.object(GraphDB, "_get")
+    def test_get_dependents_returns_list(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = {"dependents": [{"arn": "C", "direction": "incoming"}]}
+        result = db.get_dependents("arn:A")
+        assert result == [{"arn": "C", "direction": "incoming"}]
+
+    @patch.object(GraphDB, "_get")
+    def test_is_populated_true(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = {"populated": True}
+        assert db.is_populated() is True
+
+    @patch.object(GraphDB, "_get")
+    def test_is_populated_false_on_failure(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = None
+        assert db.is_populated() is False
+
+    @patch.object(GraphDB, "_get")
+    def test_staleness_minutes_returns_value(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = {"staleness_minutes": 42}
+        assert db.staleness_minutes() == 42
+
+    @patch.object(GraphDB, "_get")
+    def test_staleness_minutes_neg1_on_failure(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = None
+        assert db.staleness_minutes() == -1
+
+    @patch.object(GraphDB, "_get")
+    def test_get_scan_summary_defaults_on_failure(self, mock_get):
+        db = _make_db()
+        mock_get.return_value = None
+        result = db.get_scan_summary()
+        assert result["resource_count"] == 0
+        assert result["relationship_count"] == 0
+        assert result["last_scan_time"] is None
+
+    @patch.object(GraphDB, "flush")
+    def test_log_scan_calls_flush(self, mock_flush):
+        db = _make_db()
+        db.log_scan("aws", "123456", 10, 5)
+        mock_flush.assert_called_once()
+
+
+# =========================================================================
+# Tests: clear
+# =========================================================================
+
+class TestClear:
+    def test_clear_empties_buffers(self):
+        db = _make_db()
+        db.upsert_resource(_make_resource("arn:1"))
+        db.upsert_relationship("arn:1", "arn:2", "connects_to")
+        assert len(db._resources) == 1
+        assert len(db._relationships) == 1
+        db.clear()
+        assert len(db._resources) == 0
+        assert len(db._relationships) == 0
