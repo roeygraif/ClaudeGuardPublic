@@ -149,6 +149,10 @@ def gather_context(parsed: Any, db: Any) -> dict:
         # ------------------------------------------------------------------
         if resource_id:
             target_record = db.find_resource(resource_id)
+            logger.info(
+                "find_resource(%s): %s",
+                resource_id, "found" if target_record else "NOT FOUND",
+            )
 
             # ------------------------------------------------------------------
             # (b) Incremental fetch on miss
@@ -165,6 +169,10 @@ def gather_context(parsed: Any, db: Any) -> dict:
                         exc_info=True,
                     )
                 target_record = db.find_resource(resource_id)
+                logger.info(
+                    "find_resource(%s) after incremental_fetch: %s",
+                    resource_id, "found" if target_record else "still NOT FOUND",
+                )
 
             # ------------------------------------------------------------------
             # (c) Still not found
@@ -188,8 +196,9 @@ def gather_context(parsed: Any, db: Any) -> dict:
             try:
                 raw_connections = db.get_connections(arn, hops=2)
                 connections = _build_connections(raw_connections)
+                logger.info("get_connections(%s): %d connections", arn, len(connections))
             except Exception:
-                logger.debug(
+                logger.warning(
                     "get_connections failed for %s", arn, exc_info=True
                 )
 
@@ -198,11 +207,17 @@ def gather_context(parsed: Any, db: Any) -> dict:
     # ------------------------------------------------------------------
     iam_context = _extract_iam_context(parsed, target, connections, db)
     network_context = _extract_network_context(parsed, target, connections, db)
+    if iam_context:
+        logger.info("IAM context: role=%s, policies=%d", iam_context.get("role"), len(iam_context.get("current_policies") or []))
+    if network_context:
+        logger.info("Network context: sg=%s, rules=%d", network_context.get("security_group"), len(network_context.get("current_rules") or []))
 
     # ------------------------------------------------------------------
     # (h) & (i) Warnings
     # ------------------------------------------------------------------
     warnings.extend(_check_warnings(parsed, target, connections, db))
+    if warnings:
+        logger.info("Warnings (%d): %s", len(warnings), "; ".join(warnings[:3]))
 
     # ------------------------------------------------------------------
     # Assemble final context

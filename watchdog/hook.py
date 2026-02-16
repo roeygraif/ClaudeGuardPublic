@@ -34,8 +34,9 @@ if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
 # Configure logging to stderr so it doesn't interfere with JSON stdout.
+_log_level = os.environ.get("GUARD_LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(
-    level=logging.WARNING,
+    level=getattr(logging, _log_level, logging.WARNING),
     format="%(name)s: %(message)s",
     stream=sys.stderr,
 )
@@ -74,6 +75,15 @@ def main() -> None:
     if parsed is None:
         sys.exit(0)  # Not a cloud command.
 
+    logger.info(
+        "Parsed command: provider=%s service=%s action=%s type=%s resource=%s",
+        getattr(parsed, "provider", None),
+        getattr(parsed, "service", None),
+        getattr(parsed, "action", None),
+        getattr(parsed, "action_type", None),
+        getattr(parsed, "resource_id", None),
+    )
+
     server_url, server_token = _resolve_server_creds()
     if not server_url or not server_token:
         print(
@@ -96,6 +106,11 @@ def main() -> None:
             needs_scan = True
             is_refresh = True
 
+    logger.info(
+        "Scan decision: needs_scan=%s, is_refresh=%s, account=%s",
+        needs_scan, is_refresh, account_key,
+    )
+
     if needs_scan:
         print_scan_header(parsed.provider.upper(), refresh=is_refresh)
 
@@ -117,6 +132,11 @@ def main() -> None:
                     "relationship_count": 0,
                     "environments": {"prod": 0, "staging": 0, "dev": 0, "unknown": 0},
                 }
+            logger.info(
+                "Scan complete: %d resources, %d relationships",
+                summary.get("resource_count", 0),
+                summary.get("relationship_count", 0),
+            )
             print_scan_complete(summary)
         except Exception as exc:
             logger.warning("Infrastructure scan failed: %s", exc)
@@ -130,10 +150,18 @@ def main() -> None:
 
     # --- READs pass silently ---
     if parsed.action_type == "READ":
+        logger.info("READ operation — passing through")
         sys.exit(0)
 
     # --- WRITE/DELETE/ADMIN: gather context, build deterministic assessment ---
     context = gather_context(parsed, db)
+
+    logger.info(
+        "gather_context: target=%s, connections=%d, warnings=%d",
+        "found" if context.get("target") else "NOT FOUND",
+        len(context.get("connected_resources") or []),
+        len(context.get("warnings") or []),
+    )
 
     # --- DENY destructive ops on unknown resources ---
     target = context.get("target")
@@ -159,7 +187,10 @@ def main() -> None:
     # Try Gemini agent on the server; fall back to deterministic.
     assessment = _analyze_on_server(server_url, server_token, parsed)
     if assessment is None:
+        logger.info("Server analysis unavailable, using deterministic fallback")
         assessment = _deterministic_assessment(context)
+    else:
+        logger.info("Server analysis returned risk_level=%s", assessment.risk_level)
 
     # Log to audit file.
     _audit_log(command, assessment)
@@ -199,6 +230,7 @@ def _incremental_discover(parsed, db) -> None:
     if not service:
         return
 
+    logger.info("Incremental discovery starting for service=%s", service)
     print_incremental_progress(service)
 
     try:
@@ -215,7 +247,17 @@ def _incremental_discover(parsed, db) -> None:
 
         # Flush buffered resources to the server so that gather_context
         # (which queries the server API) can find them.
+        logger.info("Flushing after incremental discovery")
         db.flush()
+
+        # Verify the target resource is now findable.
+        resource_id = getattr(parsed, "resource_id", None)
+        if resource_id:
+            found = db.find_resource(resource_id)
+            if found:
+                logger.info("Post-flush verify: resource %s is findable", resource_id)
+            else:
+                logger.warning("Post-flush verify: resource %s NOT FOUND after flush", resource_id)
     except Exception as exc:
         logger.warning("Incremental discovery failed for %s: %s", service, exc)
 
@@ -354,7 +396,8 @@ def _analyze_on_server(
             detailed_analysis=data.get("detailed_analysis", ""),
             cost_estimate=data.get("cost_estimate", ""),
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("_analyze_on_server failed: %s", exc, exc_info=True)
         return None
 
 

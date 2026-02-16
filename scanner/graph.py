@@ -81,6 +81,12 @@ class GraphDB:
         self._scan_provider: str | None = None
         self._scan_account: str | None = None
 
+        # Local read cache that survives flush — lets find_resource return
+        # data even before the server has ingested it (eventual consistency).
+        self._flushed_resources: dict[str, dict] = {}
+
+        logger.info("GraphDB initialised (server=%s)", self._server_url or "offline")
+
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
@@ -105,9 +111,9 @@ class GraphDB:
             )
             if resp.status_code == 200:
                 return resp.json()
-            logger.debug("GET %s returned %s", path, resp.status_code)
+            logger.warning("GET %s returned %s", path, resp.status_code)
         except Exception as exc:
-            logger.debug("GET %s failed: %s", path, exc)
+            logger.warning("GET %s failed: %s", path, exc)
         return None
 
     # ------------------------------------------------------------------
@@ -125,6 +131,7 @@ class GraphDB:
 
         arn = resource["arn"]
         self._resources[arn] = resource
+        logger.info("Buffered resource: %s (%s)", arn, resource.get("resource_type", "?"))
 
     def upsert_relationship(
         self,
@@ -164,6 +171,15 @@ class GraphDB:
         if not self._resources and not self._relationships:
             return
 
+        logger.info(
+            "Flushing %d resources, %d relationships to server",
+            len(self._resources), len(self._relationships),
+        )
+
+        # Preserve a local read cache so find_resource can still return
+        # data even if the server hasn't ingested it yet.
+        self._flushed_resources.update(self._resources)
+
         try:
             import requests
 
@@ -173,37 +189,72 @@ class GraphDB:
                 "provider": self._scan_provider,
                 "account_or_project": self._scan_account,
             }
+
+            # Use json.dumps with default=str to handle datetime/Decimal
+            # from boto3 that requests.post(json=) cannot serialise.
+            headers = {**self._headers(), "Content-Type": "application/json"}
+            body = json.dumps(payload, default=str)
+
             resp = requests.post(
                 f"{self._server_url}/api/v1/graph/sync",
-                json=payload,
-                headers=self._headers(),
+                data=body,
+                headers=headers,
                 timeout=60,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                logger.debug(
+                logger.info(
                     "Synced %s resources, %s relationships",
                     data.get("resources_upserted"),
                     data.get("relationships_upserted"),
                 )
+                # Only clear buffers on successful flush.
+                self._resources.clear()
+                self._relationships.clear()
             else:
-                logger.debug("Sync failed: %s", resp.status_code)
+                logger.warning(
+                    "Sync failed (HTTP %s): %s", resp.status_code, resp.text[:200]
+                )
         except Exception as exc:
-            logger.debug("Sync failed: %s", exc)
-
-        # Clear buffers after flush attempt.
-        self._resources.clear()
-        self._relationships.clear()
+            logger.warning("Sync failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Read methods (hit server API)
     # ------------------------------------------------------------------
 
     def find_resource(self, identifier: str) -> dict | None:
-        """Search by ARN, name, or ARN substring."""
+        """Search by ARN, name, or ARN substring.
+
+        Checks local buffers first (pre-flush and post-flush caches) so
+        that recently-scanned resources are findable even before the
+        server has ingested them (DynamoDB eventual consistency).
+        """
+        # 1. Check current write buffer (not yet flushed).
+        if identifier in self._resources:
+            logger.info("find_resource(%s): found in write buffer", identifier)
+            return self._resources[identifier]
+
+        # 2. Check flushed cache (survives flush, covers consistency gap).
+        if identifier in self._flushed_resources:
+            logger.info("find_resource(%s): found in flushed cache", identifier)
+            return self._flushed_resources[identifier]
+
+        # 3. Substring / name match in local caches.
+        for cache_name, cache in [("write buffer", self._resources), ("flushed cache", self._flushed_resources)]:
+            for arn, res in cache.items():
+                if identifier in arn or identifier == res.get("name"):
+                    logger.info("find_resource(%s): matched in %s (arn=%s)", identifier, cache_name, arn)
+                    return res
+
+        # 4. Fall back to server API.
         data = self._get("/api/v1/graph/find-resource", params={"id": identifier})
         if data:
-            return data.get("resource")
+            resource = data.get("resource")
+            if resource:
+                logger.info("find_resource(%s): found on server", identifier)
+                return resource
+
+        logger.warning("find_resource(%s): NOT FOUND anywhere", identifier)
         return None
 
     def get_connections(self, arn: str, hops: int = 2) -> list[dict]:
