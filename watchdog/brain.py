@@ -1,5 +1,5 @@
 """
-Cloud Watchdog Brain — Risk assessment data model and mapping tables.
+ClaudeGuard Brain — Risk assessment data model and mapping tables.
 
 Provides the ``RiskAssessment`` dataclass and deterministic risk-level
 mappings used by the hook to classify cloud operations by action type

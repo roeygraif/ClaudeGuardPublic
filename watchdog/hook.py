@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cloud Watchdog — PreToolUse hook entrypoint.
+ClaudeGuard — PreToolUse hook entrypoint.
 
 This script is invoked by Claude Code before every tool use. It reads
 the tool invocation from stdin as JSON, and:
@@ -87,7 +87,7 @@ def main() -> None:
     server_url, server_token = _resolve_server_creds()
     if not server_url or not server_token:
         print(
-            "\033[33m  Cloud Watchdog requires login. Run: claude-guard login\033[0m",
+            "\033[33m  ClaudeGuard requires login. Run: claude-guard login\033[0m",
             file=sys.stderr,
         )
         sys.stderr.flush()
@@ -288,6 +288,7 @@ def _resolve_server_creds() -> tuple[str | None, str | None]:
                 try:
                     with open(_CONFIG_FILE, "w") as f:
                         _json.dump(cfg, f, indent=2)
+                    os.chmod(_CONFIG_FILE, 0o600)
                 except Exception:
                     pass
 
@@ -487,7 +488,7 @@ def _build_permission_reason(assessment, context: dict) -> str:
     RESET = "\033[0m"
 
     lines = []
-    lines.append(f"{BOLD_RED}////// CLOUD WATCHDOG — Risk: {risk} //////{RESET}")
+    lines.append(f"{BOLD_RED}////// CLAUDEGUARD — Risk: {risk} //////{RESET}")
     lines.append("")
 
     if summary:
@@ -580,7 +581,7 @@ def _build_permission_reason(assessment, context: dict) -> str:
         lines.append("")
 
     # --- Instruction for Claude Code's model ---
-    lines.append(f"{BOLD_RED}You are Cloud Watchdog. Based on the infrastructure context above, "
+    lines.append(f"{BOLD_RED}You are ClaudeGuard. Based on the infrastructure context above, "
                   f"explain the risks of this command to the user. Be specific about what "
                   f"could break.{RESET}")
 
@@ -659,7 +660,7 @@ def _build_investigation_reason(parsed, context: dict) -> str:
 
     lines = []
     lines.append(
-        f"{BOLD_RED}////// CLOUD WATCHDOG — DENIED: Unknown Resource //////{RESET}"
+        f"{BOLD_RED}////// CLAUDEGUARD — DENIED: Unknown Resource //////{RESET}"
     )
     lines.append("")
     lines.append(

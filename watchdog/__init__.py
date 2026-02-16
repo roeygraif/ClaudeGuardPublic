@@ -1,1 +1,1 @@
-# Cloud Watchdog — PreToolUse Hook for Claude Code
+# ClaudeGuard — PreToolUse Hook for Claude Code

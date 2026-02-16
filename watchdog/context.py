@@ -1,5 +1,5 @@
 """
-Context gathering module for Cloud Watchdog.
+Context gathering module for ClaudeGuard.
 
 Bridges the command parser and the Claude brain by querying the
 infrastructure graph and assembling a rich context bundle that describes

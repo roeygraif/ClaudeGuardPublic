@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Claude Guard — CLI entry point for Cloud Watchdog.
+Claude Guard — CLI entry point for ClaudeGuard.
 
 Usage:
-    claude-guard             Launch Claude Code with Cloud Watchdog supervision
+    claude-guard             Launch Claude Code with ClaudeGuard supervision
     claude-guard scan        Manually refresh the infrastructure graph
     claude-guard scan --aws  Scan AWS only
     claude-guard scan --gcp  Scan GCP only
@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# The directory where Cloud Watchdog stores persistent data.
+# The directory where ClaudeGuard stores persistent data.
 WATCHDOG_DIR = Path.home() / ".cloud-watchdog"
 
 logger = logging.getLogger(__name__)
@@ -103,9 +103,11 @@ def _load_config() -> dict:
 
 
 def _save_config(cfg: dict) -> None:
-    """Persist config to disk."""
+    """Persist config to disk with restricted permissions (owner-only)."""
     WATCHDOG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(WATCHDOG_DIR, 0o700)
     _CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+    os.chmod(_CONFIG_FILE, 0o600)
 
 
 def main() -> None:
@@ -263,7 +265,7 @@ def _launch_claude(extra_args: list[str]) -> None:
         if not api_key:
             # No server login and no API key — run interactive login.
             print(
-                "\033[33m  No Cloud Guard credentials found. "
+                "\033[33m  No ClaudeGuard credentials found. "
                 "Let's get you set up.\033[0m\n",
                 file=sys.stderr,
             )
@@ -312,7 +314,7 @@ def _launch_claude(extra_args: list[str]) -> None:
                             "type": "command",
                             "command": hook_command,
                             "timeout": 120,
-                            "statusMessage": "Cloud Watchdog analyzing...",
+                            "statusMessage": "ClaudeGuard analyzing...",
                         }
                     ],
                 }
@@ -403,7 +405,7 @@ def _launch_claude(extra_args: list[str]) -> None:
     finally:
         _restore_settings(settings_file, backup_file)
         print(
-            "\n\033[31m  Cloud Watchdog hook removed. Session ended.\033[0m",
+            "\n\033[31m  ClaudeGuard hook removed. Session ended.\033[0m",
             file=sys.stderr,
         )
 

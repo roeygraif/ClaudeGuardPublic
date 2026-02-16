@@ -1,7 +1,7 @@
 """
-ANSI terminal display formatter for Cloud Watchdog.
+ANSI terminal display formatter for ClaudeGuard.
 
-Formats all Cloud Watchdog output as colored ANSI text intended for stderr.
+Formats all ClaudeGuard output as colored ANSI text intended for stderr.
 All public functions return strings; the caller is responsible for printing
 to stderr.
 """
@@ -167,13 +167,13 @@ def print_scan_header(provider: str, refresh: bool = False) -> None:
     if refresh:
         lines = [
             f"{BOLD_RED}{_BORDER}{RESET}",
-            f"{RED}  CLOUD WATCHDOG \u2014 Refreshing infrastructure ({provider}){RESET}",
+            f"{RED}  CLAUDEGUARD \u2014 Refreshing infrastructure ({provider}){RESET}",
             f"{BOLD_RED}{_BORDER}{RESET}",
         ]
     else:
         lines = [
             f"{BOLD_RED}{_BORDER}{RESET}",
-            f"{RED}  CLOUD WATCHDOG{RESET}",
+            f"{RED}  CLAUDEGUARD{RESET}",
             f"{RED}  Initial infrastructure scan ({provider}){RESET}",
             f"{RED}  This first scan maps your infrastructure and may{RESET}",
             f"{RED}  take 30-60 seconds. Subsequent commands are faster.{RESET}",
